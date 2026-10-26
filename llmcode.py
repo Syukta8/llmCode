@@ -47,9 +47,9 @@ def cmd_setup(args):
         print(f"Creating Python virtual environment in {venv_dir}...")
         subprocess.run([sys.executable, '-m', 'venv', str(venv_dir)], check=True)
     
-    pip_exe = venv_dir / ('Scripts/pip.exe' if os.name == 'nt' else 'bin/pip')
+    py_exe = venv_dir / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python3')
     print("Installing requirements...")
-    subprocess.run([str(pip_exe), 'install', '-q', '-r', str(server_dir / 'requirements.txt')], check=True)
+    subprocess.run([str(py_exe), '-m', 'pip', 'install', '-q', '-r', str(server_dir / 'requirements.txt')], check=True)
     
     # Download/Compile binaries if missing
     llama_bin = get_llama_server_binary()

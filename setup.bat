@@ -9,7 +9,6 @@ cd /d "%SCRIPT_DIR%"
 
 set "VENV_DIR=%SCRIPT_DIR%src\LLMServer\.venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
-set "VENV_PIP=%VENV_DIR%\Scripts\pip.exe"
 
 REM Fast-start path if already setup
 if "%1"=="run" goto :FAST_START
@@ -38,12 +37,12 @@ if not exist "%VENV_DIR%" (
 )
 
 echo Installing Python dependencies...
-"%VENV_PIP%" install --upgrade pip -q
-"%VENV_PIP%" install -q -r "%SCRIPT_DIR%src\LLMServer\requirements.txt"
+"%VENV_PY%" -m pip install --upgrade pip -q
+"%VENV_PY%" -m pip install -q -r "%SCRIPT_DIR%src\LLMServer\requirements.txt"
 
 if "%1"=="--with-tools" (
     echo Installing optional coding agents (aider-chat)...
-    "%VENV_PIP%" install -q aider-chat
+    "%VENV_PY%" -m pip install -q aider-chat
 )
 
 echo Configuring engine binaries...
