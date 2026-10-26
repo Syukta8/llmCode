@@ -46,14 +46,14 @@ if "%1"=="--with-tools" (
 )
 
 echo Configuring engine binaries...
-"%VENV_PY%" "%SCRIPT_DIR%llmcode.py" setup %*
+"%VENV_PY%" "%SCRIPT_DIR%llmcode.py" setup
 
 echo === llmCode Setup Complete ===
 echo Launch dashboard anytime with: setup.bat run (or: setup.bat dash)
 
-if "%1"=="run" (
+if "%~1"=="run" (
     "%VENV_PY%" "%SCRIPT_DIR%llmcode.py" dash
 )
-if "%1"=="dash" (
+if "%~1"=="dash" (
     "%VENV_PY%" "%SCRIPT_DIR%llmcode.py" dash
 )
