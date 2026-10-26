@@ -11,8 +11,8 @@ set "VENV_DIR=%SCRIPT_DIR%src\LLMServer\.venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 
 REM Fast-start path if already setup
-if "%1"=="run" goto :FAST_START
-if "%1"=="dash" goto :FAST_START
+if "%~1"=="run" goto :FAST_START
+if "%~1"=="dash" goto :FAST_START
 goto :FULL_SETUP
 
 :FAST_START
@@ -40,7 +40,7 @@ echo Installing Python dependencies...
 "%VENV_PY%" -m pip install --upgrade pip -q
 "%VENV_PY%" -m pip install -q -r "%SCRIPT_DIR%src\LLMServer\requirements.txt"
 
-if "%1"=="--with-tools" (
+if "%~1"=="--with-tools" (
     echo Installing optional coding agents (aider-chat)...
     "%VENV_PY%" -m pip install -q aider-chat
 )
