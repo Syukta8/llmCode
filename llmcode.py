@@ -117,7 +117,7 @@ def cmd_serve(args):
         model_file = ggufs[0]
         
     print(f"Serving model: {model_file.name}")
-    print(f"Offloading {args.layers} GPU layers | Context: {args.context} | Port: {args.port}")
+    print(f"Offloading {args.layers} GPU layers | Context: {args.context} | Batch: {args.batch} | Port: {args.port}")
     
     cmd = [
         str(llama_bin),
@@ -128,12 +128,22 @@ def cmd_serve(args):
         '--ctx-size', str(args.context),
         '--n-gpu-layers', str(args.layers),
         '--threads', str(args.threads),
+        '-b', str(args.batch),
+        '-ub', str(args.ubatch),
+        '--temp', str(args.temp),
+        '--top-p', str(args.top_p),
+        '--top-k', str(args.top_k),
+        '--min-p', str(args.min_p),
+        '--repeat-penalty', str(args.repeat_penalty),
         '--parallel', '1',
         '--jinja',
-        '-fa', 'on',
-        '-ctk', 'q8_0',
-        '-ctv', 'q8_0',
+        '-fa', args.flash_attn,
     ]
+    if args.kv_cache != 'f16':
+        cmd += ['-ctk', args.kv_cache, '-ctv', args.kv_cache]
+    if args.custom_flags:
+        cmd.extend([c for c in args.custom_flags.split() if c.strip()])
+
     try:
         subprocess.run(cmd)
     except KeyboardInterrupt:
@@ -184,8 +194,18 @@ def main():
     p_serve.add_argument("--layers", type=int, default=8, help="GPU layers to offload")
     p_serve.add_argument("--context", type=int, default=8192, help="Context size")
     p_serve.add_argument("--threads", type=int, default=4, help="CPU threads")
+    p_serve.add_argument("--batch", type=int, default=2048, help="Batch size")
+    p_serve.add_argument("--ubatch", type=int, default=256, help="Physical micro-batch size")
+    p_serve.add_argument("--temp", type=float, default=0.2, help="Sampling temperature")
+    p_serve.add_argument("--top-p", type=float, default=0.95, help="Top-p sampling")
+    p_serve.add_argument("--top-k", type=int, default=40, help="Top-k sampling")
+    p_serve.add_argument("--min-p", type=float, default=0.05, help="Min-p sampling")
+    p_serve.add_argument("--repeat-penalty", type=float, default=1.05, help="Repetition penalty")
+    p_serve.add_argument("--flash-attn", default="on", choices=["on", "off"], help="Flash attention")
+    p_serve.add_argument("--kv-cache", default="q8_0", choices=["f16", "q8_0", "q4_0"], help="KV cache quantization")
     p_serve.add_argument("--port", type=int, default=8080, help="Port to listen on")
     p_serve.add_argument("--alias", default="", help="Model alias")
+    p_serve.add_argument("--custom-flags", default="", help="Additional raw flags to pass")
     p_serve.set_defaults(func=cmd_serve)
 
     # dash

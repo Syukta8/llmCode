@@ -80,21 +80,26 @@ def save_settings(data):
     SETTINGS_FILE.write_text(json.dumps(current, indent=2) + '\n')
 
 
-# detect_terminal imported from src.common.process
-
-
 class Deploy(BaseModel):
     path: str
     backend: str = Field(default='llama.cpp', pattern=r'^(llama\.cpp|koboldcpp|ollama)$')
-    alias: str = Field(pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
-    layers: int = Field(default=8, ge=0, le=100)
-    context: int = Field(default=8192, ge=512, le=131072)
-    threads: int = Field(default=4, ge=1, le=32)
+    alias: str = Field(default='local-qwen', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
+    layers: int = Field(default=8, ge=0, le=200)
+    context: int = Field(default=8192, ge=512, le=262144)
+    threads: int = Field(default=4, ge=1, le=128)
+    batch: int = Field(default=2048, ge=32, le=16384)
+    ubatch: int = Field(default=256, ge=32, le=4096)
     reasoning: bool = False
     flash_attn: str = Field(default='on', pattern='^(on|off)$')
     kv_cache: str = Field(default='q8_0', pattern='^(f16|q8_0|q4_0)$')
     temp: float = Field(default=0.2, ge=0.0, le=2.0)
-    ubatch: int = Field(default=256, ge=32, le=2048)
+    top_p: float = Field(default=0.95, ge=0.0, le=1.0)
+    top_k: int = Field(default=40, ge=0, le=200)
+    min_p: float = Field(default=0.05, ge=0.0, le=1.0)
+    repeat_penalty: float = Field(default=1.05, ge=0.0, le=3.0)
+    main_gpu: int = Field(default=0, ge=0, le=16)
+    split_mode: str = Field(default='layer', pattern='^(none|layer|row)$')
+    custom_flags: str = ''
 
 class Download(BaseModel):
     repo: str
@@ -105,28 +110,43 @@ class OpenCodeLaunch(BaseModel):
     model_path: str = ''
     backend: str = Field(default='llama.cpp', pattern=r'^(llama\.cpp|koboldcpp|ollama)$')
     alias: str = Field(default='local-qwen', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
-    layers: int = Field(default=8, ge=0, le=100)
-    context: int = Field(default=8192, ge=512, le=131072)
-    threads: int = Field(default=4, ge=1, le=32)
+    layers: int = Field(default=8, ge=0, le=200)
+    context: int = Field(default=8192, ge=512, le=262144)
+    threads: int = Field(default=4, ge=1, le=128)
+    batch: int = Field(default=2048, ge=32, le=16384)
+    ubatch: int = Field(default=256, ge=32, le=4096)
     flash_attn: str = Field(default='on', pattern='^(on|off)$')
     kv_cache: str = Field(default='q8_0', pattern='^(f16|q8_0|q4_0)$')
     temp: float = Field(default=0.2, ge=0.0, le=2.0)
-    ubatch: int = Field(default=256, ge=32, le=2048)
+    top_p: float = Field(default=0.95, ge=0.0, le=1.0)
+    top_k: int = Field(default=40, ge=0, le=200)
+    min_p: float = Field(default=0.05, ge=0.0, le=1.0)
+    repeat_penalty: float = Field(default=1.05, ge=0.0, le=3.0)
+    main_gpu: int = Field(default=0, ge=0, le=16)
+    split_mode: str = Field(default='layer', pattern='^(none|layer|row)$')
+    custom_flags: str = ''
 
 class AiderLaunch(BaseModel):
     project_dir: str
     model_path: str = ''
     backend: str = Field(default='llama.cpp', pattern=r'^(llama\.cpp|koboldcpp|ollama)$')
     alias: str = Field(default='local-qwen', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
-    layers: int = Field(default=8, ge=0, le=100)
-    context: int = Field(default=8192, ge=512, le=131072)
-    threads: int = Field(default=4, ge=1, le=32)
+    layers: int = Field(default=8, ge=0, le=200)
+    context: int = Field(default=8192, ge=512, le=262144)
+    threads: int = Field(default=4, ge=1, le=128)
+    batch: int = Field(default=2048, ge=32, le=16384)
+    ubatch: int = Field(default=256, ge=32, le=4096)
     flash_attn: str = Field(default='on', pattern='^(on|off)$')
     kv_cache: str = Field(default='q8_0', pattern='^(f16|q8_0|q4_0)$')
     temp: float = Field(default=0.2, ge=0.0, le=2.0)
-    ubatch: int = Field(default=256, ge=32, le=2048)
+    top_p: float = Field(default=0.95, ge=0.0, le=1.0)
+    top_k: int = Field(default=40, ge=0, le=200)
+    min_p: float = Field(default=0.05, ge=0.0, le=1.0)
+    repeat_penalty: float = Field(default=1.05, ge=0.0, le=3.0)
+    main_gpu: int = Field(default=0, ge=0, le=16)
+    split_mode: str = Field(default='layer', pattern='^(none|layer|row)$')
+    custom_flags: str = ''
     edit_format: str = Field(default='diff', pattern=r'^(diff|whole|udiff|architect)$')
-
 
 
 def safe_model_path(path):
@@ -197,44 +217,82 @@ def models():
 
 
 def launch_backend_process(backend, path, params):
-    """Launch llama.cpp, koboldcpp, or ollama on port PORT."""
+    """Launch llama.cpp, koboldcpp, or ollama on port PORT with extended parameter support."""
     global proc, log_handle
+    custom_args = [arg for arg in params.custom_flags.split() if arg.strip()] if getattr(params, 'custom_flags', None) else []
+
     if backend == 'koboldcpp':
         if not KOBOLD_BIN.is_file():
             raise HTTPException(400, f'koboldcpp not found at {KOBOLD_BIN}')
-        args = ['python3', str(KOBOLD_BIN), '--model', str(path),
-                '--port', str(PORT), '--contextsize', str(params.context),
-                '--gpulayers', str(params.layers), '--threads', str(params.threads),
-                '--usecuda', '--smartcontext', '--skiplauncher', '--quiet']
+        args = [
+            'python3', str(KOBOLD_BIN), '--model', str(path),
+            '--port', str(PORT),
+            '--contextsize', str(params.context),
+            '--gpulayers', str(params.layers),
+            '--threads', str(params.threads),
+            '--blasbatchsize', str(params.batch),
+            '--smartcontext', '--skiplauncher', '--quiet'
+        ]
+        if params.layers > 0:
+            args.append('--usecuda')
+        if params.flash_attn == 'on':
+            args.append('--flashattention')
+        args.extend(custom_args)
+
     elif backend == 'ollama':
         if not OLLAMA_BIN.is_file():
             raise HTTPException(400, f'ollama binary not found at {OLLAMA_BIN}')
-        # Create or update an Ollama modelfile pointing to this GGUF
         model_name = params.alias or 'local-gguf'
         modelfile_path = STORE / 'Modelfile'
-        modelfile_path.write_text(f"FROM {path}\nPARAMETER num_ctx {params.context}\nPARAMETER num_gpu {params.layers}\n")
-        # Ensure ollama serve runs
+        modelfile_content = [
+            f"FROM {path}",
+            f"PARAMETER num_ctx {params.context}",
+            f"PARAMETER num_gpu {params.layers}",
+            f"PARAMETER num_thread {params.threads}",
+            f"PARAMETER temperature {params.temp}",
+            f"PARAMETER top_p {params.top_p}",
+            f"PARAMETER top_k {params.top_k}",
+            f"PARAMETER repeat_penalty {params.repeat_penalty}",
+        ]
+        modelfile_path.write_text("\n".join(modelfile_content) + "\n")
         env = os.environ.copy()
         env['OLLAMA_HOST'] = f'127.0.0.1:{PORT}'
         args = [str(OLLAMA_BIN), 'serve']
+        args.extend(custom_args)
+
     else:  # default llama.cpp
         if not SERVER_BIN.is_file():
             raise HTTPException(400, f'llama-server not found at {SERVER_BIN}')
-        args = [str(SERVER_BIN), '--model', str(path), '--alias', params.alias,
-                '--host', '127.0.0.1', '--port', str(PORT),
-                '--ctx-size', str(params.context), '--n-gpu-layers', str(params.layers),
-                '--threads', str(params.threads), '--parallel', '1', '--jinja',
-                '-fa', params.flash_attn, '--temp', str(params.temp), '-ub', str(params.ubatch)]
+        args = [
+            str(SERVER_BIN), '--model', str(path), '--alias', params.alias,
+            '--host', '127.0.0.1', '--port', str(PORT),
+            '--ctx-size', str(params.context),
+            '--n-gpu-layers', str(params.layers),
+            '--threads', str(params.threads),
+            '-b', str(params.batch),
+            '-ub', str(params.ubatch),
+            '--temp', str(params.temp),
+            '--top-p', str(params.top_p),
+            '--top-k', str(params.top_k),
+            '--min-p', str(params.min_p),
+            '--repeat-penalty', str(params.repeat_penalty),
+            '--parallel', '1', '--jinja',
+            '-fa', params.flash_attn,
+            '-sm', params.split_mode,
+            '--main-gpu', str(params.main_gpu)
+        ]
         if params.kv_cache != 'f16':
             args += ['-ctk', params.kv_cache, '-ctv', params.kv_cache]
         if hasattr(params, 'reasoning') and not params.reasoning:
             args += ['--reasoning', 'off']
+        args.extend(custom_args)
 
     log_handle = open(LOG_FILE, 'a', buffering=1)
     log_handle.write(f'\n===== [{backend}] ' + datetime.now().isoformat() + ' =====\n')
     env = os.environ.copy()
     if backend == 'ollama':
         env['OLLAMA_HOST'] = f'127.0.0.1:{PORT}'
+
     proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log_handle,
                             stderr=subprocess.STDOUT, start_new_session=True, cwd=str(STORE), env=env)
     settings['active'] = {
@@ -245,10 +303,18 @@ def launch_backend_process(backend, path, params):
         'layers': params.layers,
         'context': params.context,
         'threads': params.threads,
+        'batch': params.batch,
+        'ubatch': params.ubatch,
         'flash_attn': params.flash_attn,
         'kv_cache': params.kv_cache,
         'temp': params.temp,
-        'ubatch': params.ubatch
+        'top_p': params.top_p,
+        'top_k': params.top_k,
+        'min_p': params.min_p,
+        'repeat_penalty': params.repeat_penalty,
+        'main_gpu': params.main_gpu,
+        'split_mode': params.split_mode,
+        'custom_flags': params.custom_flags,
     }
     settings['pid'] = proc.pid
     return args
@@ -259,6 +325,26 @@ def start(params:Deploy):
     with lock:
         if alive(): raise HTTPException(409,'A server started by this dashboard is already running. Stop it first.')
         args = launch_backend_process(params.backend, path, params)
+        save_settings({
+            'last_model_path': str(path),
+            'last_backend': params.backend,
+            'last_alias': params.alias,
+            'last_layers': params.layers,
+            'last_context': params.context,
+            'last_threads': params.threads,
+            'last_batch': params.batch,
+            'last_ubatch': params.ubatch,
+            'last_flash_attn': params.flash_attn,
+            'last_kv_cache': params.kv_cache,
+            'last_temp': params.temp,
+            'last_top_p': params.top_p,
+            'last_top_k': params.top_k,
+            'last_min_p': params.min_p,
+            'last_repeat_penalty': params.repeat_penalty,
+            'last_main_gpu': params.main_gpu,
+            'last_split_mode': params.split_mode,
+            'last_custom_flags': params.custom_flags,
+        })
         return {'ok':True,'pid':proc.pid,'command':args,'message':f'[{params.backend}] launching; health may take time to become ready.'}
 
 @app.post('/api/stop')
@@ -297,75 +383,93 @@ def hf_files(repo:str):
         return {'files':files}
     except Exception as e: raise HTTPException(502,f'Hugging Face file listing failed: {e}')
 
-
-def download_worker(did,repo,filename):
-    entry=downloads[did]
-    try:
-        MODEL_DIR.mkdir(parents=True,exist_ok=True)
-        dst_dir=(MODEL_DIR/repo.replace('/','__')).resolve()
-        if not dst_dir.is_relative_to(MODEL_DIR): raise ValueError('Bad destination')
-        dst_dir.mkdir(parents=True,exist_ok=True)
-        out=dst_dir/filename
-        part=dst_dir/(filename+'.part')
-        if out.exists(): raise ValueError('File already exists; will not overwrite')
-        entry['path']=str(out)
-        link='https://huggingface.co/'+repo+'/resolve/main/'+urllib.parse.quote(filename,safe='/')
-        req=urllib.request.Request(link,headers={'User-Agent':'LocalLLM-Control-Center/0.1'})
-        with urllib.request.urlopen(req,timeout=60) as resp, open(part,'wb') as w:
-            entry['total']=int(resp.headers.get('Content-Length',0))
-            save_downloads()
-            last_save = time.time()
-            while True:
-                chunk=resp.read(1024*1024)
-                if not chunk:break
-                w.write(chunk);entry['received']+=len(chunk)
-                if time.time() - last_save >= 1.0:
-                    save_downloads()
-                    last_save = time.time()
-        if entry['received']<1024: raise ValueError('Unexpectedly small GGUF download')
-        os.replace(part,out)
-        entry['state']='complete'
-        save_downloads()
-    except Exception as e:
-        entry['state']='error';entry['error']=str(e)
-        save_downloads()
-
 @app.post('/api/hf/download')
-def hf_download(params:Download):
-    if not re.fullmatch(r'[\w.-]+/[\w.-]+',params.repo): raise HTTPException(400,'Invalid repository')
-    if not params.filename.lower().endswith('.gguf') or params.filename.startswith('/') or '..' in Path(params.filename).parts or '\\' in params.filename: raise HTTPException(400,'Invalid GGUF filename')
-    # Fetch repo inventory to ensure download is selected from actual repository.
-    result=hf_files(params.repo)
-    if params.filename not in [f['filename'] for f in result['files']]: raise HTTPException(400,'GGUF is not listed in repository')
-    did=uuid.uuid4().hex[:12]
-    downloads[did]={'id':did,'repo':params.repo,'filename':params.filename,'received':0,'total':0,'state':'downloading','error':None}
-    save_downloads()
-    threading.Thread(target=download_worker,args=(did,params.repo,params.filename),daemon=True).start()
-    return downloads[did]
+def hf_download(d:Download):
+    if not re.fullmatch(r'[\w.-]+/[\w.-]+',d.repo): raise HTTPException(400,'Invalid repo id')
+    if not d.filename.lower().endswith('.gguf') or '/' in d.filename or '\\' in d.filename:
+        raise HTTPException(400,'Invalid filename (must be GGUF filename without subdirectories)')
+
+    dest_dir = MODEL_DIR / d.repo.replace('/', '__')
+    dest_path = dest_dir / d.filename
+
+    dl_id = f"{d.repo}:{d.filename}"
+    with lock:
+        if dl_id in downloads and downloads[dl_id]['state'] == 'downloading':
+            raise HTTPException(409, 'Download already running')
+        downloads[dl_id] = {
+            'id': dl_id, 'repo': d.repo, 'filename': d.filename,
+            'dest': str(dest_path), 'state': 'downloading',
+            'received': 0, 'total': 0, 'speed_mb_s': 0,
+            'started': datetime.now().isoformat(), 'error': None
+        }
+        save_downloads()
+
+    def worker():
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            part_path = dest_path.with_suffix(dest_path.suffix + '.part')
+            url = f"https://huggingface.co/{d.repo}/resolve/main/{d.filename}"
+            req = urllib.request.Request(url, headers={'User-Agent': 'llmCode/1.0'})
+            t0 = time.time()
+            with urllib.request.urlopen(req, timeout=30) as resp, open(part_path, 'wb') as f:
+                total = int(resp.headers.get('Content-Length', 0))
+                with lock:
+                    downloads[dl_id]['total'] = total
+                    save_downloads()
+                buf_size = 1024 * 1024
+                received = 0
+                while True:
+                    chunk = resp.read(buf_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    received += len(chunk)
+                    elapsed = max(0.1, time.time() - t0)
+                    with lock:
+                        downloads[dl_id]['received'] = received
+                        downloads[dl_id]['speed_mb_s'] = round((received / elapsed) / 1e6, 2)
+            part_path.rename(dest_path)
+            with lock:
+                downloads[dl_id]['state'] = 'complete'
+                downloads[dl_id]['completed'] = datetime.now().isoformat()
+                save_downloads()
+        except Exception as e:
+            with lock:
+                downloads[dl_id]['state'] = 'error'
+                downloads[dl_id]['error'] = str(e)
+                save_downloads()
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    return {'ok': True, 'id': dl_id, 'message': 'Download started in background'}
 
 @app.get('/api/downloads')
-def get_downloads():return {'downloads':list(downloads.values())}
+def list_downloads():
+    with lock:
+        return {'downloads': list(downloads.values())}
 
 @app.get('/api/settings')
 def get_settings():
     return load_settings()
 
-
 @app.get('/api/directories')
 def list_directories(base: str = ''):
-    """List subdirectories for project directory picker."""
-    target = Path(base or str(HOME)).expanduser().resolve()
-    if not target.is_dir():
-        raise HTTPException(400, 'Not a directory')
+    current = Path(base).expanduser().resolve() if base else HOME
+    if not current.is_dir():
+        current = HOME
     dirs = []
     try:
-        for entry in sorted(target.iterdir()):
-            if entry.is_dir() and not entry.name.startswith('.'):
-                dirs.append({'name': entry.name, 'path': str(entry)})
+        for entry in os.scandir(current):
+            if entry.is_dir(follow_symlinks=False) and not entry.name.startswith('.'):
+                dirs.append({'name': entry.name, 'path': entry.path})
     except PermissionError:
         pass
-    return {'parent': str(target.parent), 'current': str(target), 'directories': dirs[:200]}
-
+    dirs.sort(key=lambda d: d['name'].lower())
+    return {
+        'current': str(current),
+        'parent': str(current.parent) if current.parent != current else str(current),
+        'directories': dirs
+    }
 
 @app.get('/api/opencode/status')
 def opencode_status():
@@ -373,20 +477,19 @@ def opencode_status():
     running = opencode_proc is not None and opencode_proc.poll() is None
     opencode_home_bin = Path.home() / '.opencode' / 'bin' / 'opencode'
     found_bin = str(opencode_home_bin) if opencode_home_bin.is_file() else (shutil.which('opencode') or shutil.which('opencode2'))
+    installed = bool(found_bin)
     return {
         'running': running,
         'pid': opencode_proc.pid if running else None,
-        'installed': found_bin is not None,
+        'installed': installed,
         'binary': found_bin,
         'terminal': detect_terminal(),
     }
 
-
 @app.post('/api/opencode/launch')
 def launch_opencode(params: OpenCodeLaunch):
-    """Auto-start llama-server if needed, then spawn opencode CLI in a terminal."""
+    """Auto-start backend server if needed, then spawn opencode CLI in a terminal."""
     global opencode_proc, proc, log_handle
-
 
     project = Path(params.project_dir).expanduser().resolve()
     if not project.is_dir():
@@ -396,68 +499,48 @@ def launch_opencode(params: OpenCodeLaunch):
     if not terminal:
         raise HTTPException(400, 'No supported terminal emulator found')
 
-    # Auto-start llama-server if not running
     with lock:
         health = server_health()
         if health is None and not alive():
-            model_path = params.model_path
-            if not model_path:
-                saved = load_settings()
-                model_path = saved.get('last_model_path', '')
+            model_path = params.model_path or load_settings().get('last_model_path', '')
             if not model_path:
                 raise HTTPException(400, 'No model selected and no last-used model found. Pick a model first.')
-
             path = safe_model_path(model_path)
-            if not SERVER_BIN.is_file():
-                raise HTTPException(400, f'llama-server not found at {SERVER_BIN}')
-
-            args = [str(SERVER_BIN), '--model', str(path), '--alias', params.alias,
-                    '--host', '127.0.0.1', '--port', str(PORT),
-                    '--ctx-size', str(params.context), '--n-gpu-layers', str(params.layers),
-                    '--threads', str(params.threads), '--parallel', '1', '--jinja',
-                    '-fa', params.flash_attn, '--temp', str(params.temp), '-ub', str(params.ubatch)]
-            if params.kv_cache != 'f16':
-                args += ['-ctk', params.kv_cache, '-ctv', params.kv_cache]
-            log_handle = open(LOG_FILE, 'a', buffering=1)
-            log_handle.write('\n===== ' + datetime.now().isoformat() + ' =====\n')
-            proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log_handle,
-                                    stderr=subprocess.STDOUT, start_new_session=True, cwd=str(STORE))
-            settings['active'] = {'name': path.name, 'path': str(path), 'alias': params.alias,
-                                  'layers': params.layers, 'context': params.context, 'threads': params.threads,
-                                  'flash_attn': params.flash_attn, 'kv_cache': params.kv_cache, 'temp': params.temp, 'ubatch': params.ubatch}
-            settings['pid'] = proc.pid
+            launch_backend_process(params.backend, path, params)
 
     save_settings({
         'last_model_path': params.model_path or load_settings().get('last_model_path', ''),
+        'last_backend': params.backend,
         'last_alias': params.alias,
         'last_layers': params.layers,
         'last_context': params.context,
         'last_threads': params.threads,
+        'last_batch': params.batch,
+        'last_ubatch': params.ubatch,
         'last_flash_attn': params.flash_attn,
         'last_kv_cache': params.kv_cache,
         'last_temp': params.temp,
-        'last_ubatch': params.ubatch,
+        'last_top_p': params.top_p,
+        'last_top_k': params.top_k,
+        'last_min_p': params.min_p,
+        'last_repeat_penalty': params.repeat_penalty,
+        'last_main_gpu': params.main_gpu,
+        'last_split_mode': params.split_mode,
+        'last_custom_flags': params.custom_flags,
         'last_project_dir': str(project),
     })
 
-    # Command: run opencode standalone directly in terminal
     opencode_home_bin = Path.home() / '.opencode' / 'bin' / 'opencode'
-    if opencode_home_bin.is_file():
-        oc_bin = str(opencode_home_bin)
-    else:
-        oc_bin = shutil.which('opencode') or shutil.which('opencode2') or 'npx opencode-ai'
+    oc_bin = str(opencode_home_bin) if opencode_home_bin.is_file() else (shutil.which('opencode') or shutil.which('opencode2') or 'npx opencode-ai')
     oc_cmd = f'{oc_bin} --standalone'
-
     opencode_proc = spawn_in_terminal(oc_cmd, cwd=project, title="OpenCode CLI")
     return {
         'ok': True,
-        'message': 'OpenCode CLI launching in terminal. It will wait for llama-server to be ready.',
+        'message': 'OpenCode CLI launching in terminal.',
         'terminal': terminal,
         'project_dir': str(project),
         'opencode_pid': opencode_proc.pid,
-        'server_was_running': health is not None or (alive() and params.model_path == ''),
     }
-
 
 @app.get('/api/aider/status')
 def aider_status():
@@ -474,10 +557,9 @@ def aider_status():
         'terminal': detect_terminal(),
     }
 
-
 @app.post('/api/aider/launch')
 def launch_aider(params: AiderLaunch):
-    """Auto-start llama-server if needed, then spawn aider in a terminal."""
+    """Auto-start backend server if needed, then spawn aider in a terminal."""
     global aider_proc, proc, log_handle
 
     project = Path(params.project_dir).expanduser().resolve()
@@ -488,7 +570,6 @@ def launch_aider(params: AiderLaunch):
     if not terminal:
         raise HTTPException(400, 'No supported terminal emulator found')
 
-    # Locate aider binary
     venv_bin = ROOT / '.venv' / 'bin' / 'aider'
     if venv_bin.is_file():
         aider_bin = str(venv_bin)
@@ -497,66 +578,47 @@ def launch_aider(params: AiderLaunch):
     if not Path(aider_bin).is_file() and not shutil.which('aider'):
         raise HTTPException(400, 'Aider CLI binary not found in venv or PATH')
 
-    # Auto-start llama-server if not running
     with lock:
         health = server_health()
         if health is None and not alive():
-            model_path = params.model_path
-            if not model_path:
-                saved = load_settings()
-                model_path = saved.get('last_model_path', '')
+            model_path = params.model_path or load_settings().get('last_model_path', '')
             if not model_path:
                 raise HTTPException(400, 'No model selected and no last-used model found. Pick a model first.')
-
             path = safe_model_path(model_path)
-            if not SERVER_BIN.is_file():
-                raise HTTPException(400, f'llama-server not found at {SERVER_BIN}')
-
-            args = [str(SERVER_BIN), '--model', str(path), '--alias', params.alias,
-                    '--host', '127.0.0.1', '--port', str(PORT),
-                    '--ctx-size', str(params.context), '--n-gpu-layers', str(params.layers),
-                    '--threads', str(params.threads), '--parallel', '1', '--jinja',
-                    '-fa', params.flash_attn, '--temp', str(params.temp), '-ub', str(params.ubatch)]
-            if params.kv_cache != 'f16':
-                args += ['-ctk', params.kv_cache, '-ctv', params.kv_cache]
-            log_handle = open(LOG_FILE, 'a', buffering=1)
-            log_handle.write('\n===== ' + datetime.now().isoformat() + ' =====\n')
-            proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log_handle,
-                                    stderr=subprocess.STDOUT, start_new_session=True, cwd=str(STORE))
-            settings['active'] = {'name': path.name, 'path': str(path), 'alias': params.alias,
-                                  'layers': params.layers, 'context': params.context, 'threads': params.threads,
-                                  'flash_attn': params.flash_attn, 'kv_cache': params.kv_cache, 'temp': params.temp, 'ubatch': params.ubatch}
-            settings['pid'] = proc.pid
+            launch_backend_process(params.backend, path, params)
 
     save_settings({
         'last_model_path': params.model_path or load_settings().get('last_model_path', ''),
+        'last_backend': params.backend,
         'last_alias': params.alias,
         'last_layers': params.layers,
         'last_context': params.context,
         'last_threads': params.threads,
+        'last_batch': params.batch,
+        'last_ubatch': params.ubatch,
         'last_flash_attn': params.flash_attn,
         'last_kv_cache': params.kv_cache,
         'last_temp': params.temp,
-        'last_ubatch': params.ubatch,
+        'last_top_p': params.top_p,
+        'last_top_k': params.top_k,
+        'last_min_p': params.min_p,
+        'last_repeat_penalty': params.repeat_penalty,
+        'last_main_gpu': params.main_gpu,
+        'last_split_mode': params.split_mode,
+        'last_custom_flags': params.custom_flags,
         'last_project_dir': str(project),
         'last_edit_format': params.edit_format,
     })
 
-    # Command: run aider connected to local llama-server
     model_arg = f'openai/{params.alias}'
     edit_arg = f'--edit-format {params.edit_format}'
     aider_cmd = f'{aider_bin} --openai-api-base http://127.0.0.1:{PORT}/v1 --openai-api-key none --model {model_arg} {edit_arg} --stream --dark-mode'
 
     aider_proc = spawn_in_terminal(aider_cmd, cwd=project, title="Aider CLI")
-
     return {
         'ok': True,
-        'message': 'Aider CLI launching in terminal. Connecting to local llama-server.',
+        'message': 'Aider CLI launching in terminal. Connecting to local server.',
         'terminal': terminal,
         'project_dir': str(project),
         'aider_pid': aider_proc.pid,
-        'server_was_running': health is not None or (alive() and params.model_path == ''),
     }
-
-
-
