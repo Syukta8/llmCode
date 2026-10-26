@@ -7,6 +7,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+VENV_DIR="$SCRIPT_DIR/src/LLMServer/.venv"
+VENV_PY="$VENV_DIR/bin/python3"
+VENV_PIP="$VENV_DIR/bin/pip"
+
+# Fast-start path if already setup
+if [ "${1:-}" = "run" ] || [ "${1:-}" = "dash" ]; then
+    if [ -x "$VENV_PY" ]; then
+        echo "Starting llmCode dashboard..."
+        exec "$VENV_PY" "$SCRIPT_DIR/llmcode.py" dash
+    fi
+fi
+
 echo "=== llmCode Setup (Linux) ==="
 
 # Check Python 3
@@ -20,14 +32,10 @@ PY_VER="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.ve
 echo "Using Python $PY_VER ($PYTHON_BIN)"
 
 # Check or create venv
-VENV_DIR="$SCRIPT_DIR/src/LLMServer/.venv"
 if [ ! -d "$VENV_DIR" ]; then
     echo "Creating virtual environment at $VENV_DIR..."
     "$PYTHON_BIN" -m venv "$VENV_DIR"
 fi
-
-VENV_PY="$VENV_DIR/bin/python3"
-VENV_PIP="$VENV_DIR/bin/pip"
 
 # Install requirements
 echo "Installing Python dependencies..."
@@ -45,7 +53,7 @@ echo "Configuring engine binaries..."
 "$VENV_PY" "$SCRIPT_DIR/llmcode.py" setup "$@"
 
 echo "=== llmCode Setup Complete ==="
-echo "Launch dashboard with: ./setup.sh run (or: ./src/LLMServer/.venv/bin/python3 llmcode.py dash)"
+echo "Launch dashboard anytime with: ./setup.sh run (or: ./setup.sh dash)"
 
 if [ "${1:-}" = "run" ] || [ "${1:-}" = "dash" ]; then
     exec "$VENV_PY" "$SCRIPT_DIR/llmcode.py" dash
