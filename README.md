@@ -35,36 +35,31 @@ python llmcode.py setup
 
 ---
 
-## 🖥️ Windows Remote Setup & GPU Compilation Guide
+## 🖥️ Windows Source Compilation Guide
 
-If setting up on a clean Windows machine (e.g. RTX 5090 / 4090 workstation), follow these steps in PowerShell (Run as Administrator):
+To compile backend binaries directly from source on Windows:
 
-### Step 1: Install Build Tools & Git via Winget
+### Step 1: Install Build Tools via Winget
 ```powershell
-# 1. Install Git, CMake, Ninja, and Python (if not present)
-winget install --id Git.Git -e --source winget
+# In PowerShell (Run as Administrator):
 winget install --id Kitware.CMake -e --source winget
 winget install --id Ninja-build.Ninja -e --source winget
-
-# 2. Install Visual Studio 2022 C++ Compiler (cl.exe and Windows SDK)
 winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive"
 ```
 
 ### Step 2: Open "x64 Native Tools Command Prompt for VS 2022"
 Ensure `cl.exe`, `nvcc.exe`, and `cmake.exe` are in the environment PATH.
 
-### Step 3: Compile llama.cpp for your GPU Architecture
+### Step 3: Build llama.cpp with CUDA Acceleration
 ```cmd
-cd C:\Users\PC\llmCode
 if not exist src\llama.cpp git clone https://github.com/ggml-org/llama.cpp.git src\llama.cpp
 cmake -S src\llama.cpp -B src\llama.cpp\build-cuda -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON
 cmake --build src\llama.cpp\build-cuda --target llama-server -j 8
 ```
-*(Copy or symlink `llama-server.exe` to `bin\windows\llama-server.exe` or let `llmcode.py` auto-detect `src\llama.cpp\build-cuda\bin\llama-server.exe`)*.
+*(The binary `llama-server.exe` will be automatically detected by `llmcode.py` and `setup.bat`)*.
 
-### Step 4: Run llmCode Setup & Start Dashboard
+### Step 4: Run Setup & Start Dashboard
 ```cmd
-cd C:\Users\PC\llmCode
 setup.bat run
 ```
 Access dashboard at `http://127.0.0.1:7860`.
