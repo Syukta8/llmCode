@@ -380,7 +380,7 @@
       </div>
       <div class="field">
         <label>Model Alias <span class="badge">OpenAI endpoint</span></label>
-        <input id="alias" class="mono" value="local-qwen">
+        <input id="alias" class="mono" value="llamacpp">
       </div>
     </div>
 
@@ -436,6 +436,26 @@
               <option value="q4_0">q4_0 (Save 75% VRAM)</option>
               <option value="f16">f16 (Uncompressed 16-bit)</option>
             </select>
+          </div>
+          <div class="field">
+            <label>Context Extension (RoPE / YaRN)</label>
+            <select id="contextExtend" onchange="onContextExtendChange()">
+              <option value="none" selected>Default (1x Native Context)</option>
+              <option value="linear_2x">2x Linear RoPE</option>
+              <option value="yarn_2x">2x YaRN</option>
+              <option value="yarn_4x">4x YaRN</option>
+              <option value="yarn_8x">8x YaRN</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Workspace RAG & Embeddings</label>
+            <div style="display:flex; gap:6px;">
+              <select id="ragEnabled">
+                <option value="false" selected>OFF (Standard Generation)</option>
+                <option value="true">ON (Embeddings + Workspace RAG)</option>
+              </select>
+              <button class="subtle" type="button" onclick="triggerRagIndex()" title="Index workspace now">Index</button>
+            </div>
           </div>
         </div>
       </div>
@@ -619,9 +639,16 @@ const post = (path, data) => api(path, {
   body: JSON.stringify(data)
 });
 
+function standardAliasFor(be) {
+  if (be === 'koboldcpp') return 'koboldcpp';
+  if (be === 'ollama') return 'ollama';
+  return 'llamacpp';
+}
+
 function onBackendChange() {
   const be = $('backendEngine').value;
-  toast('Switched backend to ' + be);
+  $('alias').value = standardAliasFor(be);
+  toast('Switched backend to ' + be + ' (alias: ' + $('alias').value + ')');
 }
 
 async function refreshStatus() {
@@ -721,9 +748,36 @@ async function loadModels() {
 }
 
 function suggestAlias() {
-  let f = $('chosenModel').selectedOptions[0]?.textContent || 'local-qwen';
-  let name = f.replace(/.*[\/\\]/, '').replace(/\.gguf$/i, '').toLowerCase().replace(/[^a-z0-9_.-]/g, '-').slice(0, 70);
-  $('alias').value = name || 'local-qwen';
+  const be = $('backendEngine').value;
+  $('alias').value = standardAliasFor(be);
+}
+
+let baseContextSize = null;
+function onContextExtendChange() {
+  const mode = $('contextExtend').value;
+  const ctxInput = $('context');
+  const currentVal = parseInt(ctxInput.value, 10) || 32768;
+  const multMap = { none: 1, linear_2x: 2, yarn_2x: 2, yarn_4x: 4, yarn_8x: 8 };
+  const prevMult = parseInt(ctxInput.dataset.mult || '1', 10) || 1;
+  if (!baseContextSize || Math.round(baseContextSize * prevMult) !== currentVal) {
+    baseContextSize = Math.max(512, Math.round(currentVal / prevMult));
+  }
+  const nextMult = multMap[mode] || 1;
+  ctxInput.dataset.mult = String(nextMult);
+  ctxInput.value = Math.min(1048576, baseContextSize * nextMult);
+  toast(`Context extension: ${mode} (-c ${ctxInput.value})`);
+}
+
+async function triggerRagIndex() {
+  const dir = $('projectDir').value.trim();
+  if (!dir) { toast('Set Active Project Workspace Directory first'); return; }
+  try {
+    toast('Indexing workspace for RAG...');
+    const res = await post('/rag/index', { project_dir: dir, query: '' });
+    toast(`RAG indexed ${res.file_count} files (${res.chunk_count} chunks)`);
+  } catch(e) {
+    toast('RAG Index Error: ' + e.message);
+  }
 }
 
 function getDeployPayload() {
@@ -738,6 +792,8 @@ function getDeployPayload() {
     ubatch: +$('ubatch').value,
     flash_attn: $('flashAttn').value,
     kv_cache: $('kvCache').value,
+    context_extend: $('contextExtend').value,
+    rag_enabled: $('ragEnabled').value === 'true',
     temp: +$('temp').value,
     top_p: +$('top_p').value,
     top_k: +$('top_k').value,
@@ -1003,6 +1059,8 @@ async function init() {
     if (s.last_ubatch) $('ubatch').value = s.last_ubatch;
     if (s.last_flash_attn) $('flashAttn').value = s.last_flash_attn;
     if (s.last_kv_cache) $('kvCache').value = s.last_kv_cache;
+    if (s.last_context_extend) $('contextExtend').value = s.last_context_extend;
+    if (s.last_rag_enabled !== undefined) $('ragEnabled').value = s.last_rag_enabled ? 'true' : 'false';
     if (s.last_temp !== undefined) $('temp').value = s.last_temp;
     if (s.last_top_p !== undefined) $('top_p').value = s.last_top_p;
     if (s.last_top_k !== undefined) $('top_k').value = s.last_top_k;

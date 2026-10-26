@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# llmCode - Unified Installer & Setup Script (Linux & macOS)
-# Sets up Python venv, compiles/downloads backend engines in src/ & bin/,
-# installs CLI agents (Aider, OpenCode), and initializes config/config.json.
+# llmCode - Unified Installer, Hardware Scanner & Uninstaller (Linux & macOS)
+# Supports:
+#   ./setup.sh              -> Full interactive setup (hardware.json, engines, venv agents, Continue)
+#   ./setup.sh --uninstall  -> Complete uninstall of venv, engines, binaries, models, configs
 # ==============================================================================
 set -euo pipefail
 
@@ -13,6 +14,14 @@ OS_NAME="$(uname -s)"
 VENV_DIR="$SCRIPT_DIR/src/LLMServer/.venv"
 VENV_PY="$VENV_DIR/bin/python3"
 VENV_PIP="$VENV_DIR/bin/pip"
+
+# Handle --uninstall before touching or creating .venv
+for arg in "$@"; do
+    if [[ "$arg" == "--uninstall" ]]; then
+        python3 "$SCRIPT_DIR/llmcode.py" setup "$@"
+        exit 0
+    fi
+done
 
 echo "=== llmCode Full Setup ($OS_NAME) ==="
 
@@ -72,10 +81,11 @@ echo "Installing core dashboard dependencies..."
 "$VENV_PIP" install --upgrade pip -q
 "$VENV_PIP" install -q -r "$SCRIPT_DIR/src/LLMServer/requirements.txt"
 
-# 4. Run interactive backend compiler & CLI agent installer
+# 4. Run hardware scan, engine compiler/downloader, venv CLI agents & Continue setup
 "$VENV_PY" "$SCRIPT_DIR/llmcode.py" setup "$@"
 
 echo ""
 echo "=== llmCode Setup Complete ==="
 echo "  Launch dashboard : ./launch.sh"
 echo "  Stop services    : ./stop.sh"
+echo "  Uninstall all    : ./setup.sh --uninstall"

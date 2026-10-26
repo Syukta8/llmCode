@@ -1,6 +1,7 @@
 import json, os, re, subprocess, threading, time, urllib.request, urllib.parse, urllib.error, shutil, signal, uuid
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -15,16 +16,26 @@ from src.common.paths import (
     CONFIG_DIR as STORE,
     CONFIG_FILE,
     DAEMON_LOG_FILE,
+    HARDWARE_FILE,
     MODEL_DIR,
     LOG_FILE,
     get_llama_server_binary,
     get_koboldcpp_binary,
     get_ollama_binary,
+    get_standard_alias,
     load_config,
+    load_hardware,
     save_config,
     sync_config,
 )
 from src.common.process import detect_terminal, spawn_in_terminal, kill_process_tree
+from src.common.rag import (
+    RAG_CONTEXT_FILE,
+    RAG_INDEX_FILE,
+    generate_rag_context_file,
+    index_workspace,
+    retrieve_chunks,
+)
 
 # Auto-verify and sync paths in config/config.json on server startup
 _initial_cfg = sync_config()
@@ -116,7 +127,7 @@ def append_log(message: str):
 class Deploy(BaseModel):
     path: str
     backend: str = Field(default='llama.cpp', pattern=r'^(llama\.cpp|koboldcpp|ollama)$')
-    alias: str = Field(default='local-qwen', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
+    alias: str = Field(default='llamacpp', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
     layers: int = Field(default=8, ge=0, le=999)
     context: int = Field(default=8192, ge=512, le=1048576)
     threads: int = Field(default=4, ge=1, le=256)
@@ -125,6 +136,8 @@ class Deploy(BaseModel):
     reasoning: bool = False
     flash_attn: str = Field(default='on', pattern='^(on|off)$')
     kv_cache: str = Field(default='q8_0', pattern='^(f16|q8_0|q4_0)$')
+    context_extend: str = Field(default='none', pattern=r'^(none|linear_2x|yarn_2x|yarn_4x|yarn_8x)$')
+    rag_enabled: bool = False
     temp: float = Field(default=0.2, ge=0.0, le=2.0)
     top_p: float = Field(default=0.95, ge=0.0, le=1.0)
     top_k: int = Field(default=40, ge=0, le=500)
@@ -140,11 +153,21 @@ class Download(BaseModel):
     filename: str
 
 
+class RAGIndexRequest(BaseModel):
+    project_dir: str = ''
+
+
+class RAGQueryRequest(BaseModel):
+    project_dir: str = ''
+    query: str = ''
+    top_k: int = Field(default=6, ge=1, le=30)
+
+
 class OpenCodeLaunch(BaseModel):
     project_dir: str
     model_path: str = ''
     backend: str = Field(default='llama.cpp', pattern=r'^(llama\.cpp|koboldcpp|ollama)$')
-    alias: str = Field(default='local-qwen', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
+    alias: str = Field(default='llamacpp', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
     layers: int = Field(default=8, ge=0, le=999)
     context: int = Field(default=8192, ge=512, le=1048576)
     threads: int = Field(default=4, ge=1, le=256)
@@ -152,6 +175,8 @@ class OpenCodeLaunch(BaseModel):
     ubatch: int = Field(default=256, ge=32, le=16384)
     flash_attn: str = Field(default='on', pattern='^(on|off)$')
     kv_cache: str = Field(default='q8_0', pattern='^(f16|q8_0|q4_0)$')
+    context_extend: str = Field(default='none', pattern=r'^(none|linear_2x|yarn_2x|yarn_4x|yarn_8x)$')
+    rag_enabled: bool = False
     temp: float = Field(default=0.2, ge=0.0, le=2.0)
     top_p: float = Field(default=0.95, ge=0.0, le=1.0)
     top_k: int = Field(default=40, ge=0, le=500)
@@ -168,7 +193,7 @@ class AiderLaunch(BaseModel):
     project_dir: str
     model_path: str = ''
     backend: str = Field(default='llama.cpp', pattern=r'^(llama\.cpp|koboldcpp|ollama)$')
-    alias: str = Field(default='local-qwen', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
+    alias: str = Field(default='llamacpp', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
     layers: int = Field(default=8, ge=0, le=999)
     context: int = Field(default=8192, ge=512, le=1048576)
     threads: int = Field(default=4, ge=1, le=256)
@@ -176,6 +201,8 @@ class AiderLaunch(BaseModel):
     ubatch: int = Field(default=256, ge=32, le=16384)
     flash_attn: str = Field(default='on', pattern='^(on|off)$')
     kv_cache: str = Field(default='q8_0', pattern='^(f16|q8_0|q4_0)$')
+    context_extend: str = Field(default='none', pattern=r'^(none|linear_2x|yarn_2x|yarn_4x|yarn_8x)$')
+    rag_enabled: bool = False
     temp: float = Field(default=0.2, ge=0.0, le=2.0)
     top_p: float = Field(default=0.95, ge=0.0, le=1.0)
     top_k: int = Field(default=40, ge=0, le=500)
@@ -315,6 +342,12 @@ def status():
         }
 
 
+@app.get('/api/hardware')
+def hardware():
+    """Returns scanned hardware profile and build/runtime recommendations from config/hardware.json."""
+    return load_hardware()
+
+
 @app.get('/api/models')
 def models():
     found = []
@@ -336,14 +369,49 @@ def models():
     return {'models': found, 'directory': str(MODEL_DIR)}
 
 
+def build_context_extension_flags(backend: str, preset: str) -> list:
+    """
+    Translates Context Extension preset ('none', 'linear_2x', 'yarn_2x', 'yarn_4x', 'yarn_8x')
+    into backend-specific RoPE / YaRN CLI flags.
+    """
+    if not preset or preset == 'none':
+        return []
+    scale_map = {
+        'linear_2x': ('linear', 2, '0.5'),
+        'yarn_2x': ('yarn', 2, '0.5'),
+        'yarn_4x': ('yarn', 4, '0.25'),
+        'yarn_8x': ('yarn', 8, '0.125'),
+    }
+    if preset not in scale_map:
+        return []
+    stype, factor, inv_scale = scale_map[preset]
+
+    if backend == 'koboldcpp':
+        return ['--ropeconfig', inv_scale, '10000']
+    elif backend == 'llama.cpp':
+        flags = ['--rope-scaling', stype, '--rope-scale', str(factor)]
+        if stype == 'yarn':
+            flags.extend(['--yarn-ext-factor', '-1.0'])
+        return flags
+    return []
+
+
 def launch_backend_process(backend, path, params):
-    """Launch llama.cpp, koboldcpp, or ollama on port PORT with extended parameter support."""
+    """Launch llama.cpp, koboldcpp, or ollama on port PORT with standard alias and extended parameter support."""
     global proc, log_handle
     sync_config()
     server_bin = get_llama_server_binary()
     kobold_bin = get_koboldcpp_binary()
     ollama_bin = get_ollama_binary()
 
+    # Standardize alias to llamacpp / koboldcpp / ollama unless user explicitly customized it
+    std_alias = get_standard_alias(backend)
+    if not getattr(params, 'alias', '') or params.alias in ('local-qwen', 'llamacpp', 'koboldcpp', 'ollama'):
+        params.alias = std_alias
+
+    ctx_ext = getattr(params, 'context_extend', 'none') or 'none'
+    rag_on = bool(getattr(params, 'rag_enabled', False))
+    ext_flags = build_context_extension_flags(backend, ctx_ext)
     custom_args = [arg for arg in params.custom_flags.split() if arg.strip()] if getattr(params, 'custom_flags', None) else []
 
     if backend == 'koboldcpp':
@@ -368,6 +436,9 @@ def launch_backend_process(backend, path, params):
             args.extend(['--quantkv', '1'])
         elif params.kv_cache == 'q4_0':
             args.extend(['--quantkv', '2'])
+        if rag_on:
+            args.append('--embeddings')
+        args.extend(ext_flags)
         args.extend(custom_args)
 
     elif backend == 'ollama':
@@ -413,6 +484,9 @@ def launch_backend_process(backend, path, params):
             args += ['-ctk', params.kv_cache, '-ctv', params.kv_cache]
         if hasattr(params, 'reasoning') and not params.reasoning:
             args += ['--reasoning', 'off']
+        if rag_on:
+            args += ['--embeddings', '--pooling', 'mean']
+        args.extend(ext_flags)
         args.extend(custom_args)
 
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -460,6 +534,8 @@ def launch_backend_process(backend, path, params):
         'ubatch': params.ubatch,
         'flash_attn': params.flash_attn,
         'kv_cache': params.kv_cache,
+        'context_extend': ctx_ext,
+        'rag_enabled': rag_on,
         'temp': params.temp,
         'top_p': params.top_p,
         'top_k': params.top_k,
@@ -491,6 +567,8 @@ def start(params: Deploy):
             'last_ubatch': params.ubatch,
             'last_flash_attn': params.flash_attn,
             'last_kv_cache': params.kv_cache,
+            'last_context_extend': params.context_extend,
+            'last_rag_enabled': params.rag_enabled,
             'last_temp': params.temp,
             'last_top_p': params.top_p,
             'last_top_k': params.top_k,
@@ -635,6 +713,34 @@ def get_settings():
     return load_settings()
 
 
+@app.post('/api/rag/index')
+def api_rag_index(req: RAGIndexRequest):
+    """Indexes the specified workspace directory into config/rag_index.json & config/rag_context.md."""
+    target = Path(req.project_dir or load_settings().get('last_project_dir', str(REPO_ROOT))).expanduser().resolve()
+    if not target.is_dir():
+        raise HTTPException(400, f'Workspace directory does not exist: {target}')
+    res = index_workspace(target)
+    append_log(f"[RAG] Indexed {res['file_count']} files ({res['chunk_count']} chunks) in {target}")
+    return res
+
+
+@app.post('/api/rag/query')
+def api_rag_query(req: RAGQueryRequest):
+    """Retrieves top relevant workspace chunks for a query and updates config/rag_context.md."""
+    target = Path(req.project_dir or load_settings().get('last_project_dir', str(REPO_ROOT))).expanduser().resolve()
+    if not target.is_dir():
+        raise HTTPException(400, f'Workspace directory does not exist: {target}')
+    ctx_file = generate_rag_context_file(target, query=req.query, top_k=req.top_k)
+    chunks = retrieve_chunks(query=req.query, top_k=req.top_k, project_dir=target)
+    return {
+        'ok': True,
+        'project_dir': str(target),
+        'query': req.query,
+        'chunks': chunks,
+        'context_file': str(ctx_file),
+    }
+
+
 @app.get('/api/directories')
 def list_directories(base: str = ''):
     current = Path(base).expanduser().resolve() if base else HOME
@@ -671,9 +777,43 @@ def opencode_status():
     }
 
 
+def write_opencode_config(project_dir: Path, alias: str, port: int, rag_context_file: Optional[Path] = None) -> Path:
+    """
+    Writes or updates opencode.json in the target project directory so OpenCode CLI
+    connects directly to the local backend API using the standard alias (llamacpp, koboldcpp, ollama).
+    """
+    cfg_path = project_dir / 'opencode.json'
+    data = {}
+    if cfg_path.is_file():
+        try:
+            data = json.loads(cfg_path.read_text(encoding='utf-8'))
+        except Exception:
+            data = {}
+    data.setdefault('$schema', 'https://opencode.ai/config.json')
+    providers = data.setdefault('provider', {})
+    providers['llmcode'] = {
+        'npm': '@ai-sdk/openai-compatible',
+        'name': f'llmCode ({alias})',
+        'options': {
+            'baseURL': f'http://127.0.0.1:{port}/v1',
+            'apiKey': 'EMPTY',
+        },
+        'models': {
+            alias: {
+                'name': alias,
+            }
+        }
+    }
+    data['model'] = f'llmcode/{alias}'
+    if rag_context_file and rag_context_file.is_file():
+        data['instructions'] = [str(rag_context_file.resolve())]
+    cfg_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+    return cfg_path
+
+
 @app.post('/api/opencode/launch')
 def launch_opencode(params: OpenCodeLaunch):
-    """Auto-start backend server if needed, then spawn opencode CLI in a terminal."""
+    """Auto-start backend server if needed, configure opencode.json with standard alias, then spawn opencode CLI."""
     global opencode_proc, proc, log_handle
 
     project = Path(params.project_dir).expanduser().resolve()
@@ -683,6 +823,10 @@ def launch_opencode(params: OpenCodeLaunch):
     terminal = detect_terminal()
     if not terminal:
         raise HTTPException(400, 'No supported terminal emulator found')
+
+    std_alias = get_standard_alias(params.backend)
+    if not params.alias or params.alias in ('local-qwen', 'llamacpp', 'koboldcpp', 'ollama'):
+        params.alias = std_alias
 
     with lock:
         health = server_health()
@@ -704,6 +848,8 @@ def launch_opencode(params: OpenCodeLaunch):
         'last_ubatch': params.ubatch,
         'last_flash_attn': params.flash_attn,
         'last_kv_cache': params.kv_cache,
+        'last_context_extend': params.context_extend,
+        'last_rag_enabled': params.rag_enabled,
         'last_temp': params.temp,
         'last_top_p': params.top_p,
         'last_top_k': params.top_k,
@@ -715,19 +861,25 @@ def launch_opencode(params: OpenCodeLaunch):
         'last_project_dir': str(project),
     })
 
+    rag_file = None
+    if params.rag_enabled:
+        index_workspace(project)
+        rag_file = RAG_CONTEXT_FILE
+
+    write_opencode_config(project, params.alias, PORT, rag_context_file=rag_file)
+
     cfg = sync_config()
     oc_bin = cfg.get('agents', {}).get('opencode') or 'npx opencode-ai'
-    oc_cmd = f'{oc_bin}'
+    oc_cmd = f'"{oc_bin}"' if ' ' in str(oc_bin) and not str(oc_bin).startswith('npx ') else f'{oc_bin}'
     if params.restore_history:
         if params.session_id.strip():
             oc_cmd += f' --session {params.session_id.strip()}'
         else:
             oc_cmd += ' --continue'
-    oc_cmd += ' --standalone'
     opencode_proc = spawn_in_terminal(oc_cmd, cwd=project, title="OpenCode CLI")
     return {
         'ok': True,
-        'message': 'OpenCode CLI launching in terminal.',
+        'message': f'OpenCode CLI launching in terminal (model: llmcode/{params.alias}).',
         'terminal': terminal,
         'project_dir': str(project),
         'opencode_pid': opencode_proc.pid,
@@ -768,6 +920,10 @@ def launch_aider(params: AiderLaunch):
     if not aider_bin:
         raise HTTPException(400, 'Aider CLI binary not found in venv or PATH. Run setup first.')
 
+    std_alias = get_standard_alias(params.backend)
+    if not params.alias or params.alias in ('local-qwen', 'llamacpp', 'koboldcpp', 'ollama'):
+        params.alias = std_alias
+
     with lock:
         health = server_health()
         if health is None and not alive():
@@ -788,6 +944,8 @@ def launch_aider(params: AiderLaunch):
         'last_ubatch': params.ubatch,
         'last_flash_attn': params.flash_attn,
         'last_kv_cache': params.kv_cache,
+        'last_context_extend': params.context_extend,
+        'last_rag_enabled': params.rag_enabled,
         'last_temp': params.temp,
         'last_top_p': params.top_p,
         'last_top_k': params.top_k,
@@ -803,6 +961,9 @@ def launch_aider(params: AiderLaunch):
     model_arg = f'openai/{params.alias}'
     edit_arg = f'--edit-format {params.edit_format}'
     aider_cmd = f'"{aider_bin}" --openai-api-base http://127.0.0.1:{PORT}/v1 --openai-api-key none --model {model_arg} {edit_arg} --stream --dark-mode'
+    if params.rag_enabled:
+        index_workspace(project)
+        aider_cmd += f' --read "{RAG_CONTEXT_FILE}"'
     if params.restore_history:
         aider_cmd += ' --restore-chat-history'
     if params.history_file.strip():

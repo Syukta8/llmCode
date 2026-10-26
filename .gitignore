@@ -20,6 +20,8 @@ bin/linux/
 config/*.pid
 config/*.tmp
 config/Modelfile
+config/rag_index.json
+config/rag_context.md
 
 # Logs & Runtime State
 logs/

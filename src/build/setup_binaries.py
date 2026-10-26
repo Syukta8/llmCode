@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Interactive cross-platform installer, prerequisite verifier, and source compiler
-for llmCode backend engines (llama.cpp, koboldcpp, ollama) and CLI coding agents
-(aider, opencode) across Windows, Linux, and macOS.
+Interactive cross-platform installer, hardware & package scanner (`config/hardware.json`),
+prerequisite verifier, source compiler for backend engines (llama.cpp, koboldcpp, ollama),
+venv-scoped CLI coding agent installer (aider, opencode), VS Code Continue configurator,
+and full uninstaller (`--uninstall`) across Windows, Linux, and macOS.
 """
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -14,7 +16,7 @@ import tarfile
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -22,14 +24,21 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.common.paths import (
     BIN_DIR,
+    CONFIG_DIR,
+    HARDWARE_FILE,
+    LOG_DIR,
+    MODEL_DIR,
     SRC_DIR,
     get_executable_name,
     get_koboldcpp_binary,
     get_llama_server_binary,
     get_ollama_binary,
     get_platform_name,
+    load_hardware,
+    save_hardware,
     sync_config,
 )
+from src.common.process import stop_all_services
 
 
 def _prompt_choice(prompt_text: str, valid_choices: List[str], default: str, non_interactive: bool = False) -> str:
@@ -46,27 +55,6 @@ def _prompt_choice(prompt_text: str, valid_choices: List[str], default: str, non
         if ans in valid_choices:
             return ans
         print(f"Please enter one of: {', '.join(valid_choices)}")
-
-
-def detect_gpu_acceleration() -> str:
-    """
-    Auto-detects available hardware acceleration:
-    - 'cuda': NVIDIA GPU on Windows or Linux
-    - 'metal': Apple Silicon / macOS
-    - 'cpu': Fallback
-    """
-    plat = get_platform_name()
-    if plat == 'macos':
-        return 'metal'
-    if shutil.which('nvidia-smi') or shutil.which('nvcc'):
-        try:
-            res = subprocess.run(['nvidia-smi', '-L'], capture_output=True, text=True, timeout=4)
-            if res.returncode == 0 and 'GPU' in res.stdout:
-                return 'cuda'
-        except Exception:
-            if shutil.which('nvcc'):
-                return 'cuda'
-    return 'cpu'
 
 
 def find_windows_msvc() -> Optional[str]:
@@ -100,7 +88,7 @@ def check_c_compiler() -> Tuple[bool, str]:
         if msvc:
             return True, f"MSVC ({msvc})"
         if shutil.which('g++') or shutil.which('clang++'):
-            return True, shutil.which('g++') or shutil.which('clang++')
+            return True, shutil.which('g++') or shutil.which('clang++') or ''
         return False, "Missing MSVC Build Tools (cl.exe) or MinGW g++"
     else:
         for comp in ('g++', 'clang++', 'c++'):
@@ -110,91 +98,254 @@ def check_c_compiler() -> Tuple[bool, str]:
         return False, "Missing C++ compiler (g++ / clang++)"
 
 
-def inspect_requirements(needs_llama_src: bool, needs_kobold_src: bool, needs_ollama_src: bool, accel: str) -> List[Dict]:
+def detect_gpu_acceleration() -> str:
     """
-    Inspects system for required build tools based on selected engines to compile.
-    Returns a list of requirement dicts: {name, found, detail, install_cmd, manual_guide}.
+    Auto-detects available hardware acceleration:
+    - 'cuda': NVIDIA GPU on Windows or Linux
+    - 'metal': Apple Silicon / macOS
+    - 'cpu': Fallback
     """
     plat = get_platform_name()
-    reqs = []
+    if plat == 'macos':
+        return 'metal'
+    if shutil.which('nvidia-smi') or shutil.which('nvcc'):
+        try:
+            res = subprocess.run(['nvidia-smi', '-L'], capture_output=True, text=True, timeout=4)
+            if res.returncode == 0 and 'GPU' in res.stdout:
+                return 'cuda'
+        except Exception:
+            if shutil.which('nvcc'):
+                return 'cuda'
+    return 'cpu'
 
-    if not (needs_llama_src or needs_kobold_src or needs_ollama_src):
-        return reqs
 
-    # 1. Git
-    git_bin = shutil.which('git')
-    reqs.append({
-        'name': 'git',
-        'found': bool(git_bin),
-        'detail': git_bin or 'Not found in PATH',
-        'install_cmd': _pkg_install_cmd(plat, 'git'),
-        'manual_guide': _manual_guide(plat, 'git'),
-    })
+def _detect_ram_mb() -> int:
+    """Detects total system RAM in MB across Windows, macOS, and Linux."""
+    try:
+        if os.name == 'nt':
+            import ctypes
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ('dwLength', ctypes.c_ulong),
+                    ('dwMemoryLoad', ctypes.c_ulong),
+                    ('ullTotalPhys', ctypes.c_ulonglong),
+                    ('ullAvailPhys', ctypes.c_ulonglong),
+                    ('ullTotalPageFile', ctypes.c_ulonglong),
+                    ('ullAvailPageFile', ctypes.c_ulonglong),
+                    ('ullTotalVirtual', ctypes.c_ulonglong),
+                    ('ullAvailVirtual', ctypes.c_ulonglong),
+                    ('sullAvailExtendedVirtual', ctypes.c_ulonglong),
+                ]
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                return int(stat.ullTotalPhys // (1024 * 1024))
+        elif sys.platform == 'darwin':
+            total_b = int(subprocess.check_output(['sysctl', '-n', 'hw.memsize'], text=True, timeout=2).strip())
+            return total_b // (1024 * 1024)
+        else:
+            for line in Path('/proc/meminfo').read_text(encoding='utf-8').splitlines():
+                if line.startswith('MemTotal:'):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return 8192
 
-    # 2. C/C++ Compiler
+
+def _detect_gpu_details() -> Dict[str, Any]:
+    """Scans GPU name, VRAM, CUDA compute capability, and acceleration type."""
+    plat = get_platform_name()
+    accel = detect_gpu_acceleration()
+    info: Dict[str, Any] = {
+        'available': False,
+        'acceleration': accel,
+        'name': 'CPU Only',
+        'vram_mb': 0,
+        'count': 0,
+        'compute_capability': '',
+        'cuda_arch': '',
+        'driver_version': '',
+    }
+
+    if plat == 'macos':
+        ram_mb = _detect_ram_mb()
+        name = 'Apple Metal GPU'
+        try:
+            res = subprocess.run(['system_profiler', 'SPDisplaysDataType'], capture_output=True, text=True, timeout=4)
+            if res.returncode == 0:
+                m = re.search(r'Chipset Model:\s*(.+)', res.stdout)
+                if m:
+                    name = m.group(1).strip()
+        except Exception:
+            pass
+        info.update({
+            'available': True,
+            'acceleration': 'metal',
+            'name': name,
+            'vram_mb': int(ram_mb * 0.75),
+            'count': 1,
+        })
+        return info
+
+    if shutil.which('nvidia-smi'):
+        try:
+            res = subprocess.run(
+                ['nvidia-smi', '--query-gpu=name,memory.total,compute_cap,driver_version', '--format=csv,noheader,nounits'],
+                capture_output=True, text=True, timeout=4
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                lines = [ln.strip() for ln in res.stdout.strip().splitlines() if ln.strip()]
+                parts = [x.strip() for x in lines[0].split(',')]
+                name = parts[0] if len(parts) > 0 else 'NVIDIA GPU'
+                vram = int(float(parts[1])) if len(parts) > 1 and parts[1].replace('.', '').isdigit() else 0
+                cc = parts[2] if len(parts) > 2 else ''
+                drv = parts[3] if len(parts) > 3 else ''
+                cuda_arch = cc.replace('.', '') if cc and re.match(r'^\d+\.\d+$', cc) else ''
+                info.update({
+                    'available': True,
+                    'acceleration': 'cuda',
+                    'name': name,
+                    'vram_mb': vram,
+                    'count': len(lines),
+                    'compute_capability': cc,
+                    'cuda_arch': cuda_arch,
+                    'driver_version': drv,
+                })
+        except Exception:
+            pass
+    return info
+
+
+def scan_and_save_hardware() -> Dict[str, Any]:
+    """
+    Scans system CPU, RAM, GPU, and installed build packages, computes optimal
+    compilation flags and runtime defaults for llama.cpp, koboldcpp, and ollama,
+    and writes the profile to `config/hardware.json`.
+    """
+    plat = get_platform_name()
+    cpu_cores = os.cpu_count() or 4
+    ram_mb = _detect_ram_mb()
+    gpu = _detect_gpu_details()
     has_cc, cc_detail = check_c_compiler()
-    reqs.append({
-        'name': 'c++ compiler',
-        'found': has_cc,
-        'detail': cc_detail,
-        'install_cmd': _pkg_install_cmd(plat, 'compiler'),
-        'manual_guide': _manual_guide(plat, 'compiler'),
-    })
+    nvcc_path = shutil.which('nvcc') or ('/usr/local/cuda/bin/nvcc' if Path('/usr/local/cuda/bin/nvcc').is_file() else None)
 
-    # 3. CMake + Ninja (needed by llama.cpp and ollama source builds)
-    if needs_llama_src or needs_ollama_src:
-        cmake_bin = shutil.which('cmake')
-        reqs.append({
-            'name': 'cmake',
-            'found': bool(cmake_bin),
-            'detail': cmake_bin or 'Not found in PATH',
-            'install_cmd': _pkg_install_cmd(plat, 'cmake'),
-            'manual_guide': _manual_guide(plat, 'cmake'),
-        })
-        ninja_bin = shutil.which('ninja') or shutil.which('make')
-        reqs.append({
-            'name': 'ninja / make',
-            'found': bool(ninja_bin),
-            'detail': ninja_bin or 'Not found in PATH',
-            'install_cmd': _pkg_install_cmd(plat, 'ninja'),
-            'manual_guide': _manual_guide(plat, 'ninja'),
-        })
+    packages = {
+        'git': {'installed': bool(shutil.which('git')), 'path': shutil.which('git')},
+        'c_compiler': {'installed': has_cc, 'detail': cc_detail},
+        'cmake': {'installed': bool(shutil.which('cmake')), 'path': shutil.which('cmake')},
+        'ninja': {'installed': bool(shutil.which('ninja')), 'path': shutil.which('ninja')},
+        'make': {'installed': bool(shutil.which('make')), 'path': shutil.which('make')},
+        'go': {'installed': bool(shutil.which('go')), 'path': shutil.which('go')},
+        'nvcc': {'installed': bool(nvcc_path), 'path': nvcc_path},
+        'npm': {'installed': bool(shutil.which('npm')), 'path': shutil.which('npm')},
+        'curl': {'installed': bool(shutil.which('curl')), 'path': shutil.which('curl')},
+    }
 
-    # 4. Make (needed by koboldcpp on Linux/macOS)
-    if needs_kobold_src and plat != 'windows':
-        make_bin = shutil.which('make')
-        reqs.append({
-            'name': 'make',
-            'found': bool(make_bin),
-            'detail': make_bin or 'Not found in PATH',
-            'install_cmd': _pkg_install_cmd(plat, 'make'),
-            'manual_guide': _manual_guide(plat, 'make'),
-        })
+    # Auto-tune runtime settings based on detected VRAM / RAM & CPU cores
+    vram_mb = gpu.get('vram_mb', 0)
+    opt_threads = max(2, min(32, cpu_cores // 2 if cpu_cores >= 8 else max(2, cpu_cores - 1)))
 
-    # 5. Go 1.22+ (needed by ollama source build)
-    if needs_ollama_src:
-        go_bin = shutil.which('go')
-        reqs.append({
-            'name': 'golang (go)',
-            'found': bool(go_bin),
-            'detail': go_bin or 'Not found in PATH',
-            'install_cmd': _pkg_install_cmd(plat, 'go'),
-            'manual_guide': _manual_guide(plat, 'go'),
-        })
+    if gpu['available']:
+        if vram_mb >= 20000:      # 24GB+ (e.g. RTX 3090/4090/5090 or 32GB+ Mac)
+            opt_layers = 99
+            opt_context = 32768
+            opt_batch = 4096
+            opt_ubatch = 512
+        elif vram_mb >= 11000:    # 12GB - 16GB
+            opt_layers = 48
+            opt_context = 16384
+            opt_batch = 2048
+            opt_ubatch = 512
+        elif vram_mb >= 7000:     # 8GB
+            opt_layers = 32
+            opt_context = 16384
+            opt_batch = 2048
+            opt_ubatch = 256
+        else:                     # <= 6GB (e.g. 3GB - 4GB GTX 1050)
+            opt_layers = 8
+            opt_context = 8192
+            opt_batch = 2048
+            opt_ubatch = 256
+        opt_flash_attn = 'on'
+    else:
+        opt_layers = 0
+        opt_context = 8192 if ram_mb >= 16000 else 4096
+        opt_batch = 1024
+        opt_ubatch = 256
+        opt_flash_attn = 'off'
 
-    # 6. CUDA Toolkit (nvcc) if CUDA GPU detected
-    if accel == 'cuda':
-        nvcc_bin = shutil.which('nvcc') or (Path('/usr/local/cuda/bin/nvcc').is_file() and '/usr/local/cuda/bin/nvcc')
-        reqs.append({
-            'name': 'cuda-toolkit (nvcc)',
-            'found': bool(nvcc_bin),
-            'detail': str(nvcc_bin) if nvcc_bin else 'NVIDIA GPU found, but nvcc compiler missing (will fallback to CPU if not installed)',
-            'install_cmd': _pkg_install_cmd(plat, 'cuda'),
-            'manual_guide': _manual_guide(plat, 'cuda'),
-            'optional': True,
-        })
+    # Auto-tune build flags for llama.cpp, koboldcpp, and ollama
+    parallel_jobs = max(2, min(16, cpu_cores - 1 if cpu_cores > 2 else 2))
+    llama_cmake_flags = ['-DCMAKE_BUILD_TYPE=Release']
+    if gpu['acceleration'] == 'cuda' and nvcc_path:
+        llama_cmake_flags.extend([
+            '-DGGML_CUDA=ON',
+            '-DGGML_CUDA_FORCE_MMQ=ON',
+            '-DGGML_CUDA_FA_ALL_QUANTS=ON',
+        ])
+        if gpu.get('cuda_arch'):
+            llama_cmake_flags.append(f"-DCMAKE_CUDA_ARCHITECTURES={gpu['cuda_arch']}")
+    elif gpu['acceleration'] == 'metal':
+        llama_cmake_flags.append('-DGGML_METAL=ON')
+    else:
+        llama_cmake_flags.append('-DGGML_NATIVE=ON')
 
-    return reqs
+    kobold_make_flags = ['LLAMA_PORTABLE=1']
+    if gpu['acceleration'] == 'cuda' and nvcc_path:
+        kobold_make_flags.append('LLAMA_CUBLAS=1')
+
+    hw_data = {
+        'platform': plat,
+        'arch': platform.machine(),
+        'cpu': {
+            'logical_cores': cpu_cores,
+            'recommended_threads': opt_threads,
+        },
+        'ram': {
+            'total_mb': ram_mb,
+            'total_gb': round(ram_mb / 1024, 1),
+        },
+        'gpu': gpu,
+        'packages': packages,
+        'build_config': {
+            'parallel_jobs': parallel_jobs,
+            'llama_cpp_cmake_flags': llama_cmake_flags,
+            'koboldcpp_make_flags': kobold_make_flags,
+        },
+        'runtime_defaults': {
+            'layers': opt_layers,
+            'context': opt_context,
+            'threads': opt_threads,
+            'batch': opt_batch,
+            'ubatch': opt_ubatch,
+            'flash_attn': opt_flash_attn,
+            'kv_cache': 'q8_0',
+        },
+    }
+
+    save_hardware(hw_data)
+    return hw_data
+
+
+def print_hardware_and_package_report(hw: Dict[str, Any]):
+    """Displays the upfront hardware and package scan report to the user."""
+    gpu = hw['gpu']
+    print("\n=== Hardware & Package Scan (Saved to config/hardware.json) ===")
+    print(f"  OS / Arch  : {hw['platform'].upper()} ({hw['arch']})")
+    print(f"  CPU Cores  : {hw['cpu']['logical_cores']} logical (auto-tuned threads: {hw['runtime_defaults']['threads']})")
+    print(f"  System RAM : {hw['ram']['total_gb']} GB ({hw['ram']['total_mb']} MB)")
+    if gpu['available']:
+        cc_str = f" | Compute {gpu['compute_capability']}" if gpu.get('compute_capability') else ""
+        print(f"  GPU        : {gpu['name']} ({gpu['vram_mb']} MB VRAM | {gpu['acceleration'].upper()}{cc_str})")
+    else:
+        print("  GPU        : None detected (CPU mode)")
+    print(f"  Auto-Tuned : layers={hw['runtime_defaults']['layers']}, ctx={hw['runtime_defaults']['context']}, batch={hw['runtime_defaults']['batch']}")
+
+    print("\n--- Detected System Packages ---")
+    for pkg_name, pkg_info in hw['packages'].items():
+        status = "INSTALLED" if pkg_info['installed'] else "MISSING  "
+        detail = pkg_info.get('path') or pkg_info.get('detail') or 'Not found'
+        print(f"  [{status}] {pkg_name:14s} : {detail}")
 
 
 def _pkg_install_cmd(plat: str, tool: str) -> List[str]:
@@ -214,7 +365,7 @@ def _pkg_install_cmd(plat: str, tool: str) -> List[str]:
         return mapping.get(tool, [])
 
     elif plat == 'macos':
-        if tool == 'compiler' or tool == 'make':
+        if tool in ('compiler', 'make'):
             return ['xcode-select', '--install']
         mapping = {
             'git': ['brew', 'install', 'git'],
@@ -276,16 +427,96 @@ def _manual_guide(plat: str, tool: str) -> str:
     return f"Install {tool} using your Linux distribution's package manager."
 
 
+def inspect_requirements(needs_llama_src: bool, needs_kobold_src: bool, needs_ollama_src: bool, accel: str) -> List[Dict]:
+    """
+    Inspects system for required build tools based on selected engines to compile.
+    Returns a list of requirement dicts: {name, found, detail, install_cmd, manual_guide}.
+    """
+    plat = get_platform_name()
+    reqs = []
+
+    if not (needs_llama_src or needs_kobold_src or needs_ollama_src):
+        return reqs
+
+    git_bin = shutil.which('git')
+    reqs.append({
+        'name': 'git',
+        'found': bool(git_bin),
+        'detail': git_bin or 'Not found in PATH',
+        'install_cmd': _pkg_install_cmd(plat, 'git'),
+        'manual_guide': _manual_guide(plat, 'git'),
+    })
+
+    has_cc, cc_detail = check_c_compiler()
+    reqs.append({
+        'name': 'c++ compiler',
+        'found': has_cc,
+        'detail': cc_detail,
+        'install_cmd': _pkg_install_cmd(plat, 'compiler'),
+        'manual_guide': _manual_guide(plat, 'compiler'),
+    })
+
+    if needs_llama_src or needs_ollama_src:
+        cmake_bin = shutil.which('cmake')
+        reqs.append({
+            'name': 'cmake',
+            'found': bool(cmake_bin),
+            'detail': cmake_bin or 'Not found in PATH',
+            'install_cmd': _pkg_install_cmd(plat, 'cmake'),
+            'manual_guide': _manual_guide(plat, 'cmake'),
+        })
+        ninja_bin = shutil.which('ninja') or shutil.which('make')
+        reqs.append({
+            'name': 'ninja / make',
+            'found': bool(ninja_bin),
+            'detail': ninja_bin or 'Not found in PATH',
+            'install_cmd': _pkg_install_cmd(plat, 'ninja'),
+            'manual_guide': _manual_guide(plat, 'ninja'),
+        })
+
+    if needs_kobold_src and plat != 'windows':
+        make_bin = shutil.which('make')
+        reqs.append({
+            'name': 'make',
+            'found': bool(make_bin),
+            'detail': make_bin or 'Not found in PATH',
+            'install_cmd': _pkg_install_cmd(plat, 'make'),
+            'manual_guide': _manual_guide(plat, 'make'),
+        })
+
+    if needs_ollama_src:
+        go_bin = shutil.which('go')
+        reqs.append({
+            'name': 'golang (go)',
+            'found': bool(go_bin),
+            'detail': go_bin or 'Not found in PATH',
+            'install_cmd': _pkg_install_cmd(plat, 'go'),
+            'manual_guide': _manual_guide(plat, 'go'),
+        })
+
+    if accel == 'cuda':
+        nvcc_bin = shutil.which('nvcc') or (Path('/usr/local/cuda/bin/nvcc').is_file() and '/usr/local/cuda/bin/nvcc')
+        reqs.append({
+            'name': 'cuda-toolkit (nvcc)',
+            'found': bool(nvcc_bin),
+            'detail': str(nvcc_bin) if nvcc_bin else 'NVIDIA GPU found, but nvcc compiler missing (will fallback to CPU if not installed)',
+            'install_cmd': _pkg_install_cmd(plat, 'cuda'),
+            'manual_guide': _manual_guide(plat, 'cuda'),
+            'optional': True,
+        })
+
+    return reqs
+
+
 def verify_and_install_requirements(reqs: List[Dict], non_interactive: bool = False) -> bool:
     """
     Displays requirement check results. If any required tool is missing, asks user
     permission to auto-install. If declined, prints manual installation guidance.
-    Returns True if all mandatory requirements are satisfied.
     """
     if not reqs:
         return True
 
-    print("\n--- Build Requirements Check ---")
+    print("\n--- Build Requirements Verification ---")
     missing = []
     for r in reqs:
         status = "FOUND" if r['found'] else ("OPTIONAL-MISSING" if r.get('optional') else "MISSING")
@@ -318,7 +549,8 @@ def verify_and_install_requirements(reqs: List[Dict], non_interactive: bool = Fa
                 except Exception as e:
                     print(f"Warning: Auto-install failed for {m['name']}: {e}")
                     print(f"Guidance: {m['manual_guide']}")
-        # Re-verify mandatory requirements
+        # Re-scan hardware.json after package installation
+        scan_and_save_hardware()
         mandatory_ok = True
         for m in missing:
             if not m.get('optional'):
@@ -354,41 +586,32 @@ def download_file(url: str, dest: Path) -> Path:
 
 
 # ==============================================================================
-# Engine 1: llama.cpp
+# Engine 1: llama.cpp (Hardware-Tuned via config/hardware.json)
 # ==============================================================================
 def compile_llama_cpp(accel: str) -> bool:
-    """Clones and compiles llama.cpp inside src/llama.cpp across Windows, Linux, and macOS."""
+    """Clones and compiles llama.cpp inside src/llama.cpp using flags from config/hardware.json."""
+    hw = load_hardware() or scan_and_save_hardware()
     src_dir = SRC_DIR / 'llama.cpp'
     if not (src_dir / 'CMakeLists.txt').is_file():
         print(f"Cloning llama.cpp into {src_dir} ...")
         subprocess.run(['git', 'clone', '--depth', '1', 'https://github.com/ggml-org/llama.cpp.git', str(src_dir)], check=True)
 
-    # Check if nvcc actually exists before enabling CUDA
-    use_cuda = accel == 'cuda' and bool(shutil.which('nvcc') or Path('/usr/local/cuda/bin/nvcc').is_file())
-    use_metal = accel == 'metal'
+    cmake_flags = hw.get('build_config', {}).get('llama_cpp_cmake_flags', ['-DCMAKE_BUILD_TYPE=Release'])
+    use_cuda = any('GGML_CUDA=ON' in f for f in cmake_flags)
+    use_metal = any('GGML_METAL=ON' in f for f in cmake_flags)
 
     build_subdir = 'build-cuda' if use_cuda else ('build-metal' if use_metal else 'build')
     build_dir = src_dir / build_subdir
 
-    cmake_args = [
-        'cmake', '-S', str(src_dir), '-B', str(build_dir),
-        '-DCMAKE_BUILD_TYPE=Release',
-    ]
+    cmake_args = ['cmake', '-S', str(src_dir), '-B', str(build_dir)]
     if shutil.which('ninja'):
         cmake_args.extend(['-G', 'Ninja'])
+    cmake_args.extend(cmake_flags)
 
-    if use_cuda:
-        cmake_args.extend([
-            '-DGGML_CUDA=ON',
-            '-DGGML_CUDA_FORCE_MMQ=ON',
-            '-DGGML_CUDA_FA_ALL_QUANTS=ON',
-        ])
-    elif use_metal:
-        cmake_args.append('-DGGML_METAL=ON')
-
-    jobs = str(max(2, (os.cpu_count() or 4) // 2))
+    jobs = str(hw.get('build_config', {}).get('parallel_jobs', 4))
     build_cmd = ['cmake', '--build', str(build_dir), '--config', 'Release', '--target', 'llama-server', '-j', jobs]
 
+    print(f"Compiling llama.cpp with hardware flags: {' '.join(cmake_flags)} (-j {jobs})")
     try:
         if os.name == 'nt':
             msvc = find_windows_msvc()
@@ -461,7 +684,6 @@ def download_prebuilt_llama_cpp(accel: str) -> bool:
             tf.extractall(dest_dir)
     archive_path.unlink(missing_ok=True)
 
-    # Locate extracted llama-server and set executable permissions (keep inside dest_dir with its DLLs/dylibs)
     exe_name = get_executable_name('llama-server')
     for p in dest_dir.rglob(exe_name):
         if p.is_file():
@@ -474,10 +696,11 @@ def download_prebuilt_llama_cpp(accel: str) -> bool:
 
 
 # ==============================================================================
-# Engine 2: KoboldCpp
+# Engine 2: KoboldCpp (Hardware-Tuned via config/hardware.json)
 # ==============================================================================
 def compile_koboldcpp(accel: str) -> bool:
-    """Clones and compiles KoboldCpp inside src/koboldcpp."""
+    """Clones and compiles KoboldCpp inside src/koboldcpp using flags from config/hardware.json."""
+    hw = load_hardware() or scan_and_save_hardware()
     src_dir = SRC_DIR / 'koboldcpp'
     if not (src_dir / 'koboldcpp.py').is_file():
         print(f"Cloning KoboldCpp into {src_dir} ...")
@@ -485,21 +708,19 @@ def compile_koboldcpp(accel: str) -> bool:
 
     plat = get_platform_name()
     if plat == 'windows':
-        # On Windows, KoboldCpp provides make_pyinstaller_cuda.bat / CMakeLists.txt
-        cmake_Args = ['cmake', '-S', str(src_dir), '-B', str(src_dir / 'build'), '-DCMAKE_BUILD_TYPE=Release']
+        cmake_args = ['cmake', '-S', str(src_dir), '-B', str(src_dir / 'build'), '-DCMAKE_BUILD_TYPE=Release']
         try:
-            subprocess.run(cmake_Args, check=True)
+            subprocess.run(cmake_args, check=True)
             subprocess.run(['cmake', '--build', str(src_dir / 'build'), '--config', 'Release'], check=True)
             return True
         except Exception as e:
             print(f"Windows KoboldCpp local build note ({e}); downloading official prebuilt binary fallback...")
             return download_prebuilt_koboldcpp(accel)
     else:
-        use_cuda = accel == 'cuda' and bool(shutil.which('nvcc') or Path('/usr/local/cuda/bin/nvcc').is_file())
-        jobs = str(max(2, (os.cpu_count() or 4) // 2))
-        make_cmd = ['make', '-C', str(src_dir), f'-j{jobs}', 'LLAMA_PORTABLE=1']
-        if use_cuda:
-            make_cmd.append('LLAMA_CUBLAS=1')
+        jobs = str(hw.get('build_config', {}).get('parallel_jobs', 4))
+        make_flags = hw.get('build_config', {}).get('koboldcpp_make_flags', ['LLAMA_PORTABLE=1'])
+        make_cmd = ['make', '-C', str(src_dir), f'-j{jobs}'] + make_flags
+        print(f"Compiling KoboldCpp with hardware flags: {' '.join(make_flags)} (-j {jobs})")
         try:
             subprocess.run(make_cmd, check=True)
             print(f"KoboldCpp compiled successfully in {src_dir}")
@@ -534,20 +755,25 @@ def download_prebuilt_koboldcpp(accel: str) -> bool:
 
 
 # ==============================================================================
-# Engine 3: Ollama
+# Engine 3: Ollama (Hardware-Tuned via config/hardware.json)
 # ==============================================================================
 def compile_ollama(accel: str) -> bool:
-    """Clones and compiles Ollama from source inside src/ollama."""
+    """Clones and compiles Ollama from source inside src/ollama using config/hardware.json."""
+    hw = load_hardware() or scan_and_save_hardware()
     src_dir = SRC_DIR / 'ollama'
     if not (src_dir / 'go.mod').is_file():
         print(f"Cloning Ollama into {src_dir} ...")
         subprocess.run(['git', 'clone', '--depth', '1', 'https://github.com/ollama/ollama.git', str(src_dir)], check=True)
 
     exe_name = get_executable_name('ollama')
+    jobs = str(hw.get('build_config', {}).get('parallel_jobs', 4))
     try:
         if (src_dir / 'CMakeLists.txt').is_file() and shutil.which('cmake'):
-            subprocess.run(['cmake', '-S', str(src_dir), '-B', str(src_dir / 'build')], check=True)
-            subprocess.run(['cmake', '--build', str(src_dir / 'build'), '--parallel'], check=True)
+            cmake_cmd = ['cmake', '-S', str(src_dir), '-B', str(src_dir / 'build'), '-DCMAKE_BUILD_TYPE=Release']
+            if hw['gpu'].get('cuda_arch'):
+                cmake_cmd.append(f"-DCMAKE_CUDA_ARCHITECTURES={hw['gpu']['cuda_arch']}")
+            subprocess.run(cmake_cmd, check=True)
+            subprocess.run(['cmake', '--build', str(src_dir / 'build'), '-j', jobs], check=True)
         subprocess.run(['go', 'build', '-o', str(src_dir / exe_name), '.'], cwd=str(src_dir), check=True)
         print(f"Ollama compiled successfully at {src_dir / exe_name}")
         return True
@@ -614,56 +840,299 @@ def download_prebuilt_ollama() -> bool:
 
 
 # ==============================================================================
-# CLI Agents: Aider & OpenCode
+# CLI Agents: Aider & OpenCode (Installed directly inside llm-dash .venv)
 # ==============================================================================
+def _install_opencode_into_venv(venv_dir: Path) -> bool:
+    """
+    Installs OpenCode CLI directly inside the llm-dash virtualenv
+    (`.venv/bin/opencode` on Linux/macOS or `.venv/Scripts/opencode.exe` on Windows).
+    Tries GitHub release binary first, then local npm --prefix .venv fallback.
+    """
+    plat = get_platform_name()
+    venv_bin_dir = venv_dir / ('Scripts' if os.name == 'nt' else 'bin')
+    venv_bin_dir.mkdir(parents=True, exist_ok=True)
+    exe_name = get_executable_name('opencode')
+    target_bin = venv_bin_dir / exe_name
+
+    if target_bin.is_file():
+        print(f"OpenCode CLI already present in venv at {target_bin}")
+        return True
+
+    # 1. Try downloading official standalone binary release from GitHub into .venv/bin or .venv/Scripts
+    api_url = "https://api.github.com/repos/sst/opencode/releases/latest"
+    req = urllib.request.Request(api_url, headers={'User-Agent': 'llmCode-Installer/1.0'})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as r:
+            rel = json.loads(r.read())
+        arch_is_arm = platform.machine().lower() in ('arm64', 'aarch64')
+        arch_tok = 'arm64' if arch_is_arm else 'x64'
+        plat_tok = 'windows' if plat == 'windows' else ('darwin' if plat == 'macos' else 'linux')
+
+        matched_asset = None
+        for asset in rel.get('assets', []):
+            aname = asset.get('name', '').lower()
+            if plat_tok in aname and arch_tok in aname and aname.endswith(('.zip', '.tar.gz', '.tgz')):
+                matched_asset = asset
+                break
+
+        if matched_asset:
+            tmp_archive = venv_bin_dir / matched_asset['name']
+            download_file(matched_asset['browser_download_url'], tmp_archive)
+            extract_tmp = venv_bin_dir / '_opencode_tmp'
+            extract_tmp.mkdir(parents=True, exist_ok=True)
+            if tmp_archive.name.endswith('.zip'):
+                with zipfile.ZipFile(tmp_archive, 'r') as zf:
+                    zf.extractall(extract_tmp)
+            else:
+                with tarfile.open(tmp_archive, 'r:gz') as tf:
+                    tf.extractall(extract_tmp)
+            tmp_archive.unlink(missing_ok=True)
+
+            for p in extract_tmp.rglob(exe_name):
+                if p.is_file():
+                    shutil.move(str(p), str(target_bin))
+                    if os.name != 'nt':
+                        target_bin.chmod(0o755)
+                    break
+            shutil.rmtree(extract_tmp, ignore_errors=True)
+            if target_bin.is_file():
+                print(f"OpenCode installed into venv at: {target_bin}")
+                return True
+    except Exception:
+        pass
+
+    # 2. Fallback: install via npm scoped to venv_dir (`npm install --prefix <venv_dir> opencode-ai`)
+    if shutil.which('npm'):
+        print(f"Installing OpenCode into {venv_dir} via npm...")
+        try:
+            subprocess.run(['npm', 'install', '--prefix', str(venv_dir), 'opencode-ai'], check=True)
+            npm_bin = venv_dir / 'node_modules' / '.bin' / ('opencode.cmd' if os.name == 'nt' else 'opencode')
+            if npm_bin.is_file():
+                if os.name == 'nt':
+                    wrapper = venv_bin_dir / 'opencode.cmd'
+                    wrapper.write_text(f'@echo off\r\n"{npm_bin}" %*\r\n', encoding='utf-8')
+                else:
+                    if target_bin.exists() or target_bin.is_symlink():
+                        target_bin.unlink(missing_ok=True)
+                    target_bin.symlink_to(npm_bin)
+                print(f"OpenCode installed in venv via npm ({npm_bin}).")
+                return True
+        except Exception as e:
+            print(f"Warning: venv npm install failed ({e}).")
+
+    print("Manual guidance for OpenCode: Install Node.js (https://nodejs.org) or download OpenCode into src/LLMServer/.venv/bin.")
+    return False
+
+
 def install_cli_agents(venv_python: str, non_interactive: bool = False):
-    """Prompts user to install Aider and/or OpenCode CLI coding agents."""
-    print("\n=== CLI Coding Agents Setup (Aider & OpenCode) ===")
-    print("  [1] Install BOTH Aider & OpenCode (Recommended)")
-    print("  [2] Install Aider only")
-    print("  [3] Install OpenCode only")
+    """Prompts user to install Aider and/or OpenCode CLI coding agents inside the llm-dash .venv."""
+    venv_dir = REPO_ROOT / 'src' / 'LLMServer' / '.venv'
+    print("\n=== CLI Coding Agents Setup (Installed in llm-dash .venv) ===")
+    print("  [1] Install BOTH Aider & OpenCode in .venv (Recommended)")
+    print("  [2] Install Aider only in .venv")
+    print("  [3] Install OpenCode only in .venv")
     print("  [4] Skip CLI agent installation")
 
     choice = _prompt_choice("Select CLI agent option (1/2/3/4)", ['1', '2', '3', '4'], default='1', non_interactive=non_interactive)
 
     if choice in ('1', '2'):
-        print("\nInstalling Aider CLI (aider-chat)...")
+        print("\nInstalling Aider CLI (aider-chat) into llm-dash .venv...")
         try:
             subprocess.run([venv_python, '-m', 'pip', 'install', '-q', 'aider-chat'], check=True)
-            print("Aider installed successfully in virtualenv.")
+            print("Aider installed successfully in llm-dash .venv.")
         except Exception as e:
             print(f"Warning: Aider pip install encountered an issue: {e}")
-            print("Manual guidance: Run `pip install aider-chat` or `uv tool install aider-chat`")
 
     if choice in ('1', '3'):
-        print("\nChecking OpenCode CLI...")
-        opencode_bin = Path.home() / '.opencode' / 'bin' / get_executable_name('opencode')
-        if opencode_bin.is_file() or shutil.which('opencode'):
-            print("OpenCode CLI is already installed.")
+        print("\nInstalling OpenCode CLI into llm-dash .venv...")
+        _install_opencode_into_venv(venv_dir)
+
+
+# ==============================================================================
+# VS Code Continue Configurator (Standard Aliases: llamacpp, koboldcpp, ollama)
+# ==============================================================================
+def setup_continue_config(continue_dir: Optional[Path] = None, port: int = 8080, non_interactive: bool = False) -> Optional[Path]:
+    """
+    Checks if VS Code Continue configuration (`~/.continue/config.yaml` or `~/.continue/config.json`)
+    exists. If found, offers to configure standard backend aliases (`llamacpp`, `koboldcpp`, `ollama`)
+    pointing to `http://127.0.0.1:<port>/v1`.
+    """
+    c_dir = continue_dir or (Path.home() / '.continue')
+    yaml_path = c_dir / 'config.yaml'
+    json_path = c_dir / 'config.json'
+
+    target_file = yaml_path if yaml_path.is_file() else (json_path if json_path.is_file() else None)
+    if not target_file:
+        return None
+
+    print(f"\nFound VS Code Continue configuration at: {target_file}")
+    ans = _prompt_choice(
+        "Configure standard llmCode backends (llamacpp, koboldcpp, ollama) in Continue? (y/n)",
+        ['y', 'yes', 'n', 'no'],
+        default='y',
+        non_interactive=non_interactive,
+    )
+    if ans not in ('y', 'yes'):
+        return None
+
+    api_base = f"http://127.0.0.1:{port}/v1"
+
+    if target_file.suffix.lower() in ('.yaml', '.yml'):
+        content = target_file.read_text(encoding='utf-8')
+        marker_start = "# >>> llmCode standard backends >>>"
+        marker_end = "# <<< llmCode standard backends <<<"
+        block = (
+            f"{marker_start}\n"
+            f"  - name: llamacpp\n"
+            f"    provider: openai\n"
+            f"    model: llamacpp\n"
+            f"    apiBase: {api_base}\n"
+            f"    apiKey: EMPTY\n"
+            f"    roles:\n"
+            f"      - chat\n"
+            f"      - edit\n"
+            f"      - apply\n"
+            f"  - name: koboldcpp\n"
+            f"    provider: openai\n"
+            f"    model: koboldcpp\n"
+            f"    apiBase: {api_base}\n"
+            f"    apiKey: EMPTY\n"
+            f"    roles:\n"
+            f"      - chat\n"
+            f"      - edit\n"
+            f"      - apply\n"
+            f"  - name: ollama\n"
+            f"    provider: openai\n"
+            f"    model: ollama\n"
+            f"    apiBase: {api_base}\n"
+            f"    apiKey: EMPTY\n"
+            f"    roles:\n"
+            f"      - chat\n"
+            f"      - edit\n"
+            f"      - apply\n"
+            f"{marker_end}"
+        )
+        if marker_start in content and marker_end in content:
+            pattern = re.compile(re.escape(marker_start) + r".*?" + re.escape(marker_end), re.DOTALL)
+            new_content = pattern.sub(block, content)
+        elif 'models:' in content:
+            new_content = content.replace('models:', f"models:\n{block}", 1)
         else:
-            if shutil.which('npm'):
-                print("Installing OpenCode via npm (`npm install -g opencode-ai`)...")
-                try:
-                    subprocess.run(['npm', 'install', '-g', 'opencode-ai'], check=True)
-                    print("OpenCode installed successfully via npm.")
-                except Exception as e:
-                    print(f"Warning: npm install failed ({e}).")
-            elif os.name != 'nt' and shutil.which('curl'):
-                print("Installing OpenCode via official installer script...")
-                try:
-                    subprocess.run('curl -fsSL https://opencode.ai/install | bash', shell=True, check=True)
-                except Exception as e:
-                    print(f"Warning: OpenCode curl installer failed ({e}).")
-                    print("Manual guidance: Install Node.js and run `npm install -g opencode-ai` or visit https://opencode.ai")
-            else:
-                print("Manual guidance for OpenCode: Install Node.js (https://nodejs.org) and run `npm install -g opencode-ai`.")
+            new_content = content.rstrip() + f"\n\nmodels:\n{block}\n"
+        target_file.write_text(new_content, encoding='utf-8')
+        print(f"Updated {target_file} with standard aliases: llamacpp, koboldcpp, ollama")
+        return target_file
+
+    elif target_file.suffix.lower() == '.json':
+        try:
+            data = json.loads(target_file.read_text(encoding='utf-8'))
+        except Exception:
+            data = {}
+        models = data.get('models', [])
+        if not isinstance(models, list):
+            models = []
+        # Remove old llmCode standard entries before re-inserting
+        models = [m for m in models if m.get('title') not in ('llamacpp', 'koboldcpp', 'ollama') and m.get('model') not in ('llamacpp', 'koboldcpp', 'ollama')]
+        for alias in ('llamacpp', 'koboldcpp', 'ollama'):
+            models.append({
+                'title': alias,
+                'provider': 'openai',
+                'model': alias,
+                'apiBase': api_base,
+                'apiKey': 'EMPTY',
+            })
+        data['models'] = models
+        target_file.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+        print(f"Updated {target_file} with standard aliases: llamacpp, koboldcpp, ollama")
+        return target_file
+
+    return None
 
 
-def main(non_interactive: bool = False):
-    plat = get_platform_name()
-    accel = detect_gpu_acceleration()
-    print(f"\n=== llmCode Backend & Agent Installer ({plat.upper()} | Acceleration: {accel.upper()}) ===")
+# ==============================================================================
+# Full Uninstaller (--uninstall)
+# ==============================================================================
+def uninstall_all(repo_root: Optional[Path] = None, non_interactive: bool = False) -> bool:
+    """
+    Completely uninstalls llmCode artifacts:
+    - Stops all running llm-dash and backend engine processes
+    - Deletes src/LLMServer/.venv
+    - Deletes src/llama.cpp, src/koboldcpp, src/ollama
+    - Deletes downloaded binaries in bin/ (preserving bin/llmCode.desktop and bin/llmCode.svg)
+    - Deletes all downloaded GGUF models in models/
+    - Deletes config/ and logs/
+    """
+    root = repo_root or REPO_ROOT
+    print("\n=== llmCode Complete Uninstaller (--uninstall) ===")
+    print("This will permanently remove:")
+    print(f"  - Virtualenv & CLI agents : {root / 'src' / 'LLMServer' / '.venv'}")
+    print(f"  - Engine sources & builds : {root / 'src' / 'llama.cpp'}, koboldcpp, ollama")
+    print(f"  - Prebuilt binaries       : {root / 'bin' / '*'}")
+    print(f"  - All downloaded models   : {root / 'models' / '*.gguf'}")
+    print(f"  - Config & Logs           : {root / 'config'}, {root / 'logs'}")
 
+    ans = _prompt_choice(
+        "\nConfirm complete uninstall of all llmCode components and models? (y/n)",
+        ['y', 'yes', 'n', 'no'],
+        default='n',
+        non_interactive=non_interactive,
+    )
+    if ans not in ('y', 'yes') and not non_interactive:
+        print("Uninstall cancelled.")
+        return False
+
+    if root == REPO_ROOT:
+        stop_all_services()
+
+    # 1. Remove virtualenv and engine source directories
+    dirs_to_remove = [
+        root / 'src' / 'LLMServer' / '.venv',
+        root / 'src' / 'llama.cpp',
+        root / 'src' / 'koboldcpp',
+        root / 'src' / 'ollama',
+        root / 'bin' / 'windows',
+        root / 'bin' / 'linux',
+        root / 'bin' / 'macos',
+        root / 'bin' / 'ollama_dist',
+        root / 'config',
+        root / 'logs',
+        root / 'models',
+    ]
+    for d in dirs_to_remove:
+        if d.exists():
+            print(f"Removing {d} ...")
+            shutil.rmtree(d, ignore_errors=True)
+
+    # 2. Remove standalone binaries inside bin/ while keeping .desktop and .svg assets
+    bin_dir = root / 'bin'
+    if bin_dir.is_dir():
+        for item in bin_dir.iterdir():
+            if item.name not in ('llmCode.desktop', 'llmCode.svg'):
+                if item.is_dir() and not item.is_symlink():
+                    shutil.rmtree(item, ignore_errors=True)
+                else:
+                    item.unlink(missing_ok=True)
+
+    # Recreate empty models, config, logs folders so repo structure stays clean
+    for empty_d in (root / 'models', root / 'config', root / 'logs'):
+        empty_d.mkdir(parents=True, exist_ok=True)
+
+    print("llmCode completely uninstalled.")
+    return True
+
+
+def main(non_interactive: bool = False, uninstall: bool = False):
+    if uninstall:
+        uninstall_all(non_interactive=non_interactive)
+        return
+
+    # 1. Scan hardware and available packages upfront and write config/hardware.json
+    hw = scan_and_save_hardware()
+    print_hardware_and_package_report(hw)
+
+    accel = hw['gpu']['acceleration']
+
+    # 2. Prompt per engine (compile from source in src/ vs prebuilt binary in bin/)
     engines = [
         ('llama.cpp', get_llama_server_binary()),
         ('koboldcpp', get_koboldcpp_binary()),
@@ -674,7 +1143,7 @@ def main(non_interactive: bool = False):
     for eng_name, existing_bin in engines:
         exists_note = f" [Already present at {existing_bin}]" if existing_bin.is_file() else " [Not installed]"
         print(f"\nBackend Engine: {eng_name}{exists_note}")
-        print(f"  [1] Compile from source in src/{eng_name}")
+        print(f"  [1] Compile from source in src/{eng_name} (auto-tuned via config/hardware.json)")
         print(f"  [2] Download prebuilt binary into bin/")
         print(f"  [3] Skip (keep current)")
         default_opt = '3' if existing_bin.is_file() else ('1' if eng_name != 'ollama' else '2')
@@ -689,11 +1158,11 @@ def main(non_interactive: bool = False):
     needs_kobold_src = selections['koboldcpp'] == '1'
     needs_ollama_src = selections['ollama'] == '1'
 
-    # Check build requirements if any engine is set to compile from source
+    # 3. Verify build requirements for selected source compilations & ask permission to auto-install
     reqs = inspect_requirements(needs_llama_src, needs_kobold_src, needs_ollama_src, accel)
     can_compile = verify_and_install_requirements(reqs, non_interactive=non_interactive)
 
-    # Execute engine actions
+    # 4. Execute engine compilation or download
     if selections['llama.cpp'] == '1':
         if can_compile:
             if not compile_llama_cpp(accel):
@@ -725,21 +1194,26 @@ def main(non_interactive: bool = False):
     elif selections['ollama'] == '2':
         download_prebuilt_ollama()
 
-    # Install CLI coding agents
+    # 5. Install CLI coding agents (Aider & OpenCode) inside llm-dash .venv
     venv_py = REPO_ROOT / 'src' / 'LLMServer' / '.venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python3')
     py_exe = str(venv_py) if venv_py.is_file() else sys.executable
     install_cli_agents(py_exe, non_interactive=non_interactive)
 
-    # Sync all resolved paths into config/config.json
-    cfg = sync_config()
-    print("\n=== Configuration Database Updated (config/config.json) ===")
-    print(f"  llama.cpp : {cfg['binaries']['llama_cpp']} (ready={cfg['binaries']['llama_cpp_exists']})")
-    print(f"  koboldcpp : {cfg['binaries']['koboldcpp']} (ready={cfg['binaries']['koboldcpp_exists']})")
-    print(f"  ollama    : {cfg['binaries']['ollama']} (ready={cfg['binaries']['ollama_exists']})")
-    print(f"  aider     : {cfg['agents']['aider'] or 'not installed'}")
-    print(f"  opencode  : {cfg['agents']['opencode'] or 'not installed'}")
+    # 6. Offer to configure VS Code Continue if ~/.continue/config.yaml or config.json exists
+    setup_continue_config(non_interactive=non_interactive)
+
+    # 7. Sync all resolved paths & hardware-tuned defaults into config/config.json
+    cfg = sync_config(apply_hardware_defaults=True)
+    print("\n=== Configuration Database Updated (config/config.json & config/hardware.json) ===")
+    print(f"  Hardware Profile : {HARDWARE_FILE}")
+    print(f"  llama.cpp        : {cfg['binaries']['llama_cpp']} (ready={cfg['binaries']['llama_cpp_exists']})")
+    print(f"  koboldcpp        : {cfg['binaries']['koboldcpp']} (ready={cfg['binaries']['koboldcpp_exists']})")
+    print(f"  ollama           : {cfg['binaries']['ollama']} (ready={cfg['binaries']['ollama_exists']})")
+    print(f"  aider (.venv)    : {cfg['agents']['aider'] or 'not installed'}")
+    print(f"  opencode (.venv) : {cfg['agents']['opencode'] or 'not installed'}")
 
 
 if __name__ == '__main__':
     non_int = '--non-interactive' in sys.argv or '-y' in sys.argv
-    main(non_interactive=non_int)
+    uninst = '--uninstall' in sys.argv
+    main(non_interactive=non_int, uninstall=uninst)

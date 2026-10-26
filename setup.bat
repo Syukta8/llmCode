@@ -1,13 +1,22 @@
 @echo off
 REM ==============================================================================
-REM llmCode - Unified Installer & Setup Script (Windows 10/11)
-REM Sets up Python venv, compiles/downloads backend engines in src\ & bin\,
-REM installs CLI agents (Aider, OpenCode), and initializes config\config.json.
+REM llmCode - Unified Installer, Hardware Scanner & Uninstaller (Windows 10/11)
+REM Supports:
+REM   setup.bat              -> Full interactive setup (hardware.json, engines, venv agents, Continue)
+REM   setup.bat --uninstall  -> Complete uninstall of venv, engines, binaries, models, configs
 REM ==============================================================================
 setlocal enabledelayedexpansion
 
 set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
+
+REM Check for --uninstall before touching .venv (avoids Windows file lock on .venv\Scripts\python.exe)
+for %%A in (%*) do (
+    if /i "%%~A"=="--uninstall" (
+        python "%SCRIPT_DIR%llmcode.py" setup %*
+        exit /b 0
+    )
+)
 
 set "VENV_DIR=%SCRIPT_DIR%src\LLMServer\.venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
@@ -35,10 +44,11 @@ echo Installing core dashboard dependencies...
 "%VENV_PY%" -m pip install --upgrade pip -q
 "%VENV_PY%" -m pip install -q -r "%SCRIPT_DIR%src\LLMServer\requirements.txt"
 
-echo Running backend engine and CLI agent setup...
+echo Running hardware scanner, backend engine setup, and CLI agent installer...
 "%VENV_PY%" "%SCRIPT_DIR%llmcode.py" setup %*
 
 echo.
 echo === llmCode Setup Complete ===
 echo   Launch dashboard : launch.bat
 echo   Stop services    : stop.bat
+echo   Uninstall all    : setup.bat --uninstall

@@ -81,6 +81,11 @@ def _open_browser(url: str):
 
 def cmd_setup(args):
     """Setup Python environment, compile/download backend binaries, install CLI agents, and sync config.json."""
+    if getattr(args, 'uninstall', False):
+        from src.build.setup_binaries import uninstall_all
+        uninstall_all(non_interactive=getattr(args, 'non_interactive', False))
+        return 0
+
     print(f"=== llmCode Setup ({sys.platform}) ===")
     server_dir = REPO_ROOT / 'src' / 'LLMServer'
     venv_dir = server_dir / '.venv'
@@ -97,7 +102,7 @@ def cmd_setup(args):
     from src.build.setup_binaries import main as run_binary_setup
     run_binary_setup(non_interactive=getattr(args, 'non_interactive', False))
 
-    sync_config()
+    sync_config(apply_hardware_defaults=True)
     print(f"\nSetup completed. Configuration saved to: {CONFIG_FILE}")
     return 0
 
@@ -164,7 +169,7 @@ def cmd_serve(args):
     cmd = [
         str(llama_bin),
         '--model', str(model_file),
-        '--alias', args.alias or model_file.stem,
+        '--alias', args.alias or 'llamacpp',
         '--host', '127.0.0.1',
         '--port', str(args.port),
         '--ctx-size', str(args.context),
@@ -281,9 +286,10 @@ def cmd_aider(args):
     """Spawn Aider connected to the running local server in an interactive terminal."""
     cfg = sync_config()
     aider_bin = cfg.get('agents', {}).get('aider') or 'aider'
+    alias = cfg.get('settings', {}).get('last_alias') or 'llamacpp'
     target_dir = Path(args.dir).expanduser().resolve()
-    aider_cmd = f'"{aider_bin}" --openai-api-base http://127.0.0.1:{args.port}/v1 --openai-api-key none --stream'
-    print(f"Launching Aider in {target_dir}...")
+    aider_cmd = f'"{aider_bin}" --openai-api-base http://127.0.0.1:{args.port}/v1 --openai-api-key none --model openai/{alias} --stream'
+    print(f"Launching Aider in {target_dir} (model: openai/{alias})...")
     spawn_in_terminal(aider_cmd, cwd=target_dir, title="llmCode Aider")
     return 0
 
@@ -295,6 +301,7 @@ def main():
     # setup
     p_setup = subparsers.add_parser("setup", help="Set up environment, backend engines, and CLI agents")
     p_setup.add_argument("-y", "--non-interactive", action="store_true", help="Run setup with default choices without prompting")
+    p_setup.add_argument("--uninstall", action="store_true", help="Completely uninstall all llmCode components, binaries, venv, configs, and models")
     p_setup.set_defaults(func=cmd_setup)
 
     # download

@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Cross-platform filesystem path resolver and configuration database for llmCode.
-Uniformly resolves storage, configuration (`config/config.json`), and binary
-locations across Windows, Linux, and macOS, with automatic path healing when
-the repository directory moves or new binaries are compiled.
+Cross-platform filesystem path resolver, hardware profile loader (`config/hardware.json`),
+and configuration database (`config/config.json`) for llmCode.
+Uniformly resolves storage, configuration, standard aliases (`llamacpp`, `koboldcpp`, `ollama`),
+and binary locations across Windows, Linux, and macOS, with automatic path healing and
+hardware-driven default tuning.
 """
 import json
 import os
@@ -31,15 +32,27 @@ for _d in (CONFIG_DIR, LOG_DIR, MODEL_DIR):
 STORE_DIR = CONFIG_DIR
 
 CONFIG_FILE = CONFIG_DIR / 'config.json'
+HARDWARE_FILE = CONFIG_DIR / 'hardware.json'
 PID_FILE = CONFIG_DIR / 'llmserver.pid'
 LOG_FILE = LOG_DIR / 'llama-server.log'
 DAEMON_LOG_FILE = LOG_DIR / 'llmserver-daemon.log'
 
-# Legacy file pointers (kept only for migration if existing)
+# Legacy file pointers
 SETTINGS_FILE = CONFIG_FILE
 DOWNLOADS_FILE = CONFIG_FILE
 
+STANDARD_ALIASES = {
+    'llama.cpp': 'llamacpp',
+    'koboldcpp': 'koboldcpp',
+    'ollama': 'ollama',
+}
+
 _config_lock = threading.RLock()
+
+
+def get_standard_alias(backend: str) -> str:
+    """Returns the standard API model alias ('llamacpp', 'koboldcpp', or 'ollama') for a backend."""
+    return STANDARD_ALIASES.get(backend, 'llamacpp')
 
 
 def get_platform_name() -> str:
@@ -56,6 +69,31 @@ def get_executable_name(name: str) -> str:
     if os.name == 'nt' and not name.lower().endswith('.exe'):
         return f"{name}.exe"
     return name
+
+
+def load_hardware() -> Dict[str, Any]:
+    """Loads config/hardware.json if present, else returns an empty dict."""
+    with _config_lock:
+        if HARDWARE_FILE.is_file():
+            try:
+                data = json.loads(HARDWARE_FILE.read_text(encoding='utf-8'))
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+        return {}
+
+
+def save_hardware(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Atomically writes hardware & package scan results to config/hardware.json."""
+    with _config_lock:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        data['updated_at'] = datetime.now().isoformat(timespec='seconds')
+        data['platform'] = get_platform_name()
+        tmp_file = HARDWARE_FILE.with_suffix('.json.tmp')
+        tmp_file.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+        tmp_file.replace(HARDWARE_FILE)
+        return data
 
 
 def _discover_llama_server() -> Path:
@@ -140,7 +178,7 @@ def _discover_ollama() -> Path:
 
 
 def _discover_aider() -> Optional[str]:
-    """Discovers aider CLI executable across venv, user local bin, and PATH."""
+    """Discovers aider CLI executable prioritizing llm-dash venv (.venv/bin or .venv/Scripts)."""
     exe = get_executable_name('aider')
     venv_dir = SRC_DIR / 'LLMServer' / '.venv'
     candidates = [
@@ -156,9 +194,14 @@ def _discover_aider() -> Optional[str]:
 
 
 def _discover_opencode() -> Optional[str]:
-    """Discovers opencode CLI executable across ~/.opencode/bin and PATH."""
+    """Discovers opencode CLI executable prioritizing llm-dash venv (.venv/bin or .venv/Scripts)."""
     exe = get_executable_name('opencode')
+    venv_dir = SRC_DIR / 'LLMServer' / '.venv'
+    venv_bin_dir = venv_dir / ('Scripts' if os.name == 'nt' else 'bin')
     candidates = [
+        venv_bin_dir / exe,
+        venv_bin_dir / 'opencode.cmd',
+        venv_dir / 'node_modules' / '.bin' / ('opencode.cmd' if os.name == 'nt' else 'opencode'),
         Path.home() / '.opencode' / 'bin' / exe,
         Path.home() / '.local' / 'bin' / exe,
     ]
@@ -170,12 +213,16 @@ def _discover_opencode() -> Optional[str]:
 
 
 def _default_config() -> Dict[str, Any]:
-    """Returns default schema for config/config.json."""
+    """Returns default schema for config/config.json, tuned by config/hardware.json if present."""
     llama_bin = _discover_llama_server()
     kobold_bin = _discover_koboldcpp()
     ollama_bin = _discover_ollama()
     aider_bin = _discover_aider()
     opencode_bin = _discover_opencode()
+
+    hw = load_hardware()
+    rt = hw.get('runtime_defaults', {})
+
     return {
         'version': 1,
         'platform': get_platform_name(),
@@ -183,6 +230,7 @@ def _default_config() -> Dict[str, Any]:
         'paths': {
             'repo_root': str(REPO_ROOT),
             'config_dir': str(CONFIG_DIR),
+            'hardware_file': str(HARDWARE_FILE),
             'model_dir': str(MODEL_DIR),
             'log_dir': str(LOG_DIR),
             'src_dir': str(SRC_DIR),
@@ -207,14 +255,16 @@ def _default_config() -> Dict[str, Any]:
             'server_port': int(os.environ.get('LLAMA_PORT', '8080')),
             'last_model_path': '',
             'last_backend': 'llama.cpp',
-            'last_alias': 'local-qwen',
-            'last_layers': 8,
-            'last_context': 8192,
-            'last_threads': 4,
-            'last_batch': 2048,
-            'last_ubatch': 256,
-            'last_flash_attn': 'on',
-            'last_kv_cache': 'q8_0',
+            'last_alias': 'llamacpp',
+            'last_layers': int(rt.get('layers', 8)),
+            'last_context': int(rt.get('context', 8192)),
+            'last_threads': int(rt.get('threads', 4)),
+            'last_batch': int(rt.get('batch', 2048)),
+            'last_ubatch': int(rt.get('ubatch', 256)),
+            'last_flash_attn': str(rt.get('flash_attn', 'on')),
+            'last_kv_cache': str(rt.get('kv_cache', 'q8_0')),
+            'last_context_extend': 'none',
+            'last_rag_enabled': False,
             'last_temp': 0.2,
             'last_top_p': 0.95,
             'last_top_k': 40,
@@ -261,13 +311,16 @@ def save_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         return cfg
 
 
-def sync_config() -> Dict[str, Any]:
+def sync_config(apply_hardware_defaults: bool = False) -> Dict[str, Any]:
     """
     Verifies all paths stored in config/config.json against the current filesystem.
     Automatically updates repo_root, model_dir, backend binaries, and CLI agent paths
     if the repository moved or new binaries were built/installed.
+    If apply_hardware_defaults is True (or config.json is newly created), applies
+    recommended layers/context/threads/batch from config/hardware.json.
     """
     with _config_lock:
+        is_new = not CONFIG_FILE.is_file()
         cfg = load_config()
         old_root = cfg.get('paths', {}).get('repo_root', '')
 
@@ -275,13 +328,13 @@ def sync_config() -> Dict[str, Any]:
         cfg['paths'] = {
             'repo_root': str(REPO_ROOT),
             'config_dir': str(CONFIG_DIR),
+            'hardware_file': str(HARDWARE_FILE),
             'model_dir': str(MODEL_DIR),
             'log_dir': str(LOG_DIR),
             'src_dir': str(SRC_DIR),
             'bin_dir': str(BIN_DIR),
         }
 
-        # Re-discover backend binaries if missing or moved
         def _resolve_or_discover(stored_path: str, discover_fn) -> Path:
             if stored_path and old_root == str(REPO_ROOT):
                 p = Path(stored_path)
@@ -302,7 +355,6 @@ def sync_config() -> Dict[str, Any]:
             'ollama_exists': ollama_bin.is_file(),
         }
 
-        # Re-discover CLI agents
         aider_bin = _discover_aider()
         opencode_bin = _discover_opencode()
         cfg['agents'] = {
@@ -311,6 +363,24 @@ def sync_config() -> Dict[str, Any]:
             'opencode': opencode_bin,
             'opencode_installed': bool(opencode_bin),
         }
+
+        # Apply hardware-tuned runtime defaults when requested or on first initialization
+        hw = load_hardware()
+        rt = hw.get('runtime_defaults', {})
+        if (apply_hardware_defaults or is_new) and rt:
+            cfg['settings']['last_layers'] = int(rt.get('layers', cfg['settings'].get('last_layers', 8)))
+            cfg['settings']['last_context'] = int(rt.get('context', cfg['settings'].get('last_context', 8192)))
+            cfg['settings']['last_threads'] = int(rt.get('threads', cfg['settings'].get('last_threads', 4)))
+            cfg['settings']['last_batch'] = int(rt.get('batch', cfg['settings'].get('last_batch', 2048)))
+            cfg['settings']['last_ubatch'] = int(rt.get('ubatch', cfg['settings'].get('last_ubatch', 256)))
+            cfg['settings']['last_flash_attn'] = str(rt.get('flash_attn', cfg['settings'].get('last_flash_attn', 'on')))
+            cfg['settings']['last_kv_cache'] = str(rt.get('kv_cache', cfg['settings'].get('last_kv_cache', 'q8_0')))
+
+        # Normalize alias to standard alias ('llamacpp', 'koboldcpp', 'ollama') if legacy default 'local-qwen'
+        backend = cfg['settings'].get('last_backend', 'llama.cpp')
+        cur_alias = cfg['settings'].get('last_alias', '')
+        if not cur_alias or cur_alias == 'local-qwen':
+            cfg['settings']['last_alias'] = get_standard_alias(backend)
 
         # Heal last_model_path if repo moved or file missing
         last_model = cfg['settings'].get('last_model_path', '')
@@ -326,7 +396,6 @@ def sync_config() -> Dict[str, Any]:
             elif not lm_path.is_file():
                 cfg['settings']['last_model_path'] = ''
 
-        # Heal last_project_dir if missing
         last_proj = cfg['settings'].get('last_project_dir', '')
         if not last_proj or not Path(last_proj).is_dir():
             cfg['settings']['last_project_dir'] = str(REPO_ROOT)
