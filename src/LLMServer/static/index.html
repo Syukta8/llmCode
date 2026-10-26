@@ -1,528 +1,973 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>llm-dash</title><style>
-:root{
-  --green:#00ff41;--dim:#2a6b3f;--amber:#ffb000;--red:#ff3333;
-  --bg:#0a0a0a;--panel:#111;--border:#1a3a1a;
-  font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;
-  color:var(--green);background:var(--bg);font-size:13px;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-body{min-height:100vh}
-button,input,select{font:inherit;color:var(--green);background:var(--bg);border:1px solid var(--dim);border-radius:4px;padding:7px 12px}
-button{cursor:pointer;text-transform:uppercase;font-size:11px;letter-spacing:1px;transition:all .15s}
-button:hover{background:var(--green);color:var(--bg)}
-button:disabled{opacity:.4;cursor:not-allowed}
-button.danger{border-color:var(--red);color:var(--red)}
-button.danger:hover{background:var(--red);color:var(--bg)}
-button.amber{border-color:var(--amber);color:var(--amber)}
-button.amber:hover{background:var(--amber);color:var(--bg)}
-input,select{width:100%}
-select option{background:var(--bg);color:var(--green)}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>llmCode Control Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0b0f17;
+      --card-bg: #111827;
+      --card-border: #1f2937;
+      --card-hover: #1e293b;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --text-dim: #6b7280;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --primary-focus: rgba(59, 130, 246, 0.25);
+      --emerald: #10b981;
+      --emerald-glow: rgba(16, 185, 129, 0.2);
+      --amber: #f59e0b;
+      --amber-glow: rgba(245, 158, 11, 0.2);
+      --rose: #f43f5e;
+      --rose-glow: rgba(244, 63, 94, 0.2);
+      --mono-font: 'JetBrains Mono', monospace;
+      --sans-font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
 
-/* layout */
-header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-h1{font-size:20px;font-weight:700;letter-spacing:2px}
-main{max-width:960px;margin:0 auto;padding:20px 24px}
-.status-bar{display:flex;gap:24px;padding:12px 0;border-bottom:1px solid var(--border);margin-bottom:20px;flex-wrap:wrap;font-size:12px}
-.status-bar .item{display:flex;gap:6px;align-items:center}
-.status-bar .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
-.dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
-.dot.off{background:var(--red);box-shadow:0 0 4px var(--red)}
-.dot.warn{background:var(--amber);box-shadow:0 0 4px var(--amber)}
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg);
+      color: var(--text-main);
+      font-family: var(--sans-font);
+      font-size: 13.5px;
+      line-height: 1.5;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
 
-/* controls */
-.section{margin-bottom:20px}
-.section-title{font-size:11px;text-transform:uppercase;letter-spacing:2px;color:var(--dim);margin-bottom:10px}
-.row{display:flex;gap:10px;align-items:end;flex-wrap:wrap}
-.field{display:flex;flex-direction:column;gap:4px}
-.field label{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--dim)}
-.field.grow{flex:1;min-width:200px}
-.field.sm{width:90px}
-.actions{display:flex;gap:8px;align-items:end;flex-wrap:wrap}
+    header {
+      background: rgba(17, 24, 39, 0.8);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--card-border);
+      padding: 14px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+    }
+    .logo-area { display: flex; align-items: center; gap: 12px; }
+    .logo-badge {
+      background: linear-gradient(135deg, #3b82f6, #6366f1);
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      letter-spacing: 0.5px;
+    }
+    .logo-text { font-size: 16px; font-weight: 700; color: #fff; letter-spacing: -0.3px; }
+    .header-status { display: flex; align-items: center; gap: 16px; font-size: 12px; color: var(--text-muted); }
 
-/* model list */
-.model-item{padding:8px 12px;border:1px solid var(--border);border-radius:4px;margin:6px 0;display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:12px}
-.model-item:hover{border-color:var(--dim)}
-.model-item .name{flex:1;word-break:break-all}
-.model-item .size{color:var(--dim);white-space:nowrap}
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 24px 20px 48px;
+      width: 100%;
+      flex: 1;
+    }
 
-/* collapsible */
-details{border:1px solid var(--border);border-radius:4px;margin-bottom:16px}
-details>summary{padding:10px 14px;cursor:pointer;font-size:11px;text-transform:uppercase;letter-spacing:2px;color:var(--dim);list-style:none;display:flex;align-items:center;gap:8px}
-details>summary::before{content:'[+]'}
-details[open]>summary::before{content:'[-]'}
-details>.content{padding:14px}
+    /* Telemetry Bar */
+    .telemetry-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 14px;
+      margin-bottom: 24px;
+    }
+    .telemetry-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 14px 18px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--text-dim);
+    }
+    .status-dot.online { background: var(--emerald); box-shadow: 0 0 10px var(--emerald); }
+    .status-dot.warn { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+    .status-dot.offline { background: var(--rose); box-shadow: 0 0 8px var(--rose); }
+    .telemetry-meta { display: flex; flex-direction: column; overflow: hidden; }
+    .telemetry-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); font-weight: 600; }
+    .telemetry-val { font-size: 13.5px; font-weight: 600; color: #fff; font-family: var(--mono-font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* logs */
-pre{white-space:pre-wrap;word-break:break-all;background:#050505;color:var(--green);padding:14px;border-radius:4px;max-height:300px;overflow:auto;font-size:11px;border:1px solid var(--border)}
+    /* Cards */
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.25);
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--card-border);
+    }
+    .card-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
 
-/* toast */
-#msg{position:fixed;top:16px;right:16px;z-index:99;background:#0a0a0a;border:1px solid var(--amber);color:var(--amber);padding:10px 16px;border-radius:4px;display:none;max-width:400px;font-size:12px}
+    /* Forms & Inputs */
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      align-items: end;
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .field label {
+      font-size: 11.5px;
+      font-weight: 500;
+      color: var(--text-muted);
+    }
+    .field label span.badge {
+      font-size: 10px;
+      background: #1e293b;
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: var(--text-dim);
+      margin-left: 4px;
+    }
+    input, select, textarea {
+      font-family: inherit;
+      font-size: 13px;
+      background: #0d131f;
+      color: var(--text-main);
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      outline: none;
+      transition: border-color .15s, box-shadow .15s;
+      width: 100%;
+    }
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px var(--primary-focus);
+    }
+    input.mono, select.mono { font-family: var(--mono-font); font-size: 12.5px; }
 
-/* dir browser */
-.dir-browser{max-height:250px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;margin-top:6px}
-.dir-entry{padding:6px 10px;cursor:pointer;font-size:12px;border-bottom:1px solid #111}
-.dir-entry:hover{background:#1a1a1a}
-.dir-parent{color:var(--amber)}
+    /* Buttons */
+    .btn-group { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button {
+      font-family: inherit;
+      font-size: 12.5px;
+      font-weight: 500;
+      border-radius: 6px;
+      padding: 8px 14px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: all .15s ease-in-out;
+      background: #1f2937;
+      color: var(--text-main);
+    }
+    button:hover { background: #374151; color: #fff; }
+    button.primary { background: var(--primary); color: #fff; }
+    button.primary:hover { background: var(--primary-hover); }
+    button.danger { background: rgba(244, 63, 94, 0.1); color: var(--rose); border: 1px solid rgba(244, 63, 94, 0.3); }
+    button.danger:hover { background: var(--rose); color: #fff; }
+    button.amber { background: rgba(245, 158, 11, 0.1); color: var(--amber); border: 1px solid rgba(245, 158, 11, 0.3); }
+    button.amber:hover { background: var(--amber); color: #000; font-weight: 600; }
+    button.subtle { background: transparent; border-color: var(--card-border); color: var(--text-muted); }
+    button.subtle:hover { border-color: var(--text-muted); color: #fff; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* hf search */
-.hf-item{border:1px solid var(--border);border-radius:4px;padding:10px;margin:6px 0;font-size:12px}
-.hf-item strong{display:block;margin-bottom:4px}
-.hf-files{margin-top:8px;padding-top:8px;border-top:1px solid var(--border)}
-.hf-file{display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:11px}
-progress{width:100%;height:8px;appearance:none;border:none;border-radius:2px}
-progress::-webkit-progress-bar{background:var(--bg);border:1px solid var(--border);border-radius:2px}
-progress::-webkit-progress-value{background:var(--green);border-radius:2px}
+    /* Collapsibles / Tabs */
+    details {
+      background: #0d131f;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      margin-top: 14px;
+      overflow: hidden;
+    }
+    details summary {
+      padding: 12px 16px;
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+      color: var(--text-muted);
+      user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      transition: background .15s;
+    }
+    details summary:hover { background: #131b2c; color: #fff; }
+    details[open] summary { border-bottom: 1px solid var(--card-border); color: #fff; background: #131b2c; }
+    details .content { padding: 16px; }
 
-footer{padding:16px 24px;text-align:center;color:var(--dim);font-size:10px;letter-spacing:1px}
-@media(max-width:700px){.row{flex-direction:column}.field.sm{width:100%}header{flex-direction:column;gap:8px}}
-</style></head><body>
+    /* Model items */
+    .model-item {
+      padding: 10px 14px;
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: #0d131f;
+      gap: 12px;
+    }
+    .model-item:hover { border-color: #374151; }
+    .model-name { font-family: var(--mono-font); font-size: 12px; word-break: break-all; color: #e5e7eb; }
+    .model-size { font-size: 11.5px; color: var(--text-dim); white-space: nowrap; }
+
+    /* Logs */
+    pre#logContent {
+      font-family: var(--mono-font);
+      font-size: 11.5px;
+      line-height: 1.6;
+      background: #080c14;
+      color: #93c5fd;
+      padding: 14px;
+      border-radius: 6px;
+      max-height: 380px;
+      overflow-y: auto;
+      border: 1px solid var(--card-border);
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* Directory Browser */
+    .dir-browser {
+      max-height: 220px;
+      overflow-y: auto;
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      margin-top: 8px;
+      background: #080c14;
+    }
+    .dir-entry {
+      padding: 7px 12px;
+      cursor: pointer;
+      font-size: 12px;
+      border-bottom: 1px solid #141d2f;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .dir-entry:hover { background: #111a2e; }
+
+    /* Toast */
+    #msg {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 100;
+      background: #1f2937;
+      color: #fff;
+      border: 1px solid #374151;
+      padding: 12px 18px;
+      border-radius: 8px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+      display: none;
+      font-size: 13px;
+      max-width: 420px;
+    }
+
+    footer {
+      border-top: 1px solid var(--card-border);
+      padding: 16px 28px;
+      text-align: center;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+  </style>
+</head>
+<body>
 
 <header>
-  <h1>llmCode</h1>
-  <span id="connection" style="font-size:11px;color:var(--dim)">connecting...</span>
+  <div class="logo-area">
+    <span class="logo-badge">llmCode</span>
+    <span class="logo-text">Control Center</span>
+  </div>
+  <div class="header-status">
+    <span id="connection">Checking server status...</span>
+  </div>
 </header>
 
 <main>
-<div id="msg"></div>
+  <div id="msg"></div>
 
-<!-- STATUS BAR -->
-<div class="status-bar">
-  <div class="item"><span class="dot off" id="gpuDot"></span><span id="gpuText">GPU: detecting...</span></div>
-  <div class="item"><span class="dot off" id="ramDot"></span><span id="ramText">RAM: ...</span></div>
-  <div class="item"><span class="dot off" id="srvDot"></span><span id="srvText">Server: offline</span></div>
-  <div class="item"><span class="dot off" id="aiderDot"></span><span id="aiderText">Aider: ...</span></div>
-</div>
-
-<!-- MODEL SELECT -->
-<div class="section">
-  <div class="section-title">Model</div>
-  <div class="row">
-    <div class="field grow"><select id="chosenModel" onchange="suggestAlias()"></select></div>
-    <button class="amber" onclick="loadModels()">Scan</button>
-  </div>
-</div>
-
-<!-- PROJECT DIR -->
-<div class="section">
-  <div class="section-title">Project Directory</div>
-  <div class="row">
-    <div class="field grow"><input id="projectDir" placeholder="/home/user/projects/my-app"></div>
-    <button onclick="toggleDirBrowser()">Browse</button>
-  </div>
-  <div id="dirBrowser" class="dir-browser" style="display:none"></div>
-</div>
-
-<!-- SERVER SETTINGS + LAUNCH -->
-<div class="section">
-  <div class="section-title">Settings & Launch</div>
-  <div class="row">
-    <div class="field sm">
-      <label>Backend</label>
-      <select id="backendEngine">
-        <option value="llama.cpp" selected>llama.cpp (default)</option>
-        <option value="koboldcpp">KoboldCpp (CUDA)</option>
-        <option value="ollama">Ollama</option>
-      </select>
+  <!-- Telemetry Bar -->
+  <div class="telemetry-grid">
+    <div class="telemetry-card">
+      <span class="status-dot" id="gpuDot"></span>
+      <div class="telemetry-meta">
+        <span class="telemetry-label">Graphics Card / VRAM</span>
+        <span class="telemetry-val" id="gpuText">Detecting...</span>
+      </div>
     </div>
-    <div class="field sm"><label>Alias</label><input id="alias" value="local-qwen"></div>
-    <div class="field sm"><label>GPU Layers</label><input id="layers" type="number" min="0" max="100" value="8"></div>
-    <div class="field sm"><label>Context</label><input id="context" type="number" min="512" value="8192"></div>
-    <div class="field sm"><label>Threads</label><input id="threads" type="number" min="1" max="32" value="4"></div>
-    <div class="actions">
-      <button onclick="launchAider()">Launch Aider</button>
-      <button onclick="startServer()">Start Server</button>
-      <button class="danger" onclick="stopServer()">Stop Server</button>
+    <div class="telemetry-card">
+      <span class="status-dot" id="ramDot"></span>
+      <div class="telemetry-meta">
+        <span class="telemetry-label">Host Memory (RAM)</span>
+        <span class="telemetry-val" id="ramText">...</span>
+      </div>
+    </div>
+    <div class="telemetry-card">
+      <span class="status-dot" id="srvDot"></span>
+      <div class="telemetry-meta">
+        <span class="telemetry-label">Backend Engine API</span>
+        <span class="telemetry-val" id="srvText">Offline</span>
+      </div>
+    </div>
+    <div class="telemetry-card">
+      <span class="status-dot" id="aiderDot"></span>
+      <div class="telemetry-meta">
+        <span class="telemetry-label">Coding Assistant (Aider)</span>
+        <span class="telemetry-val" id="aiderText">...</span>
+      </div>
     </div>
   </div>
-</div>
 
-<!-- ADVANCED TUNING -->
-<details>
-  <summary>Advanced Tuning</summary>
-  <div class="content">
-    <div class="row">
-      <div class="field sm">
-        <label>Aider Mode</label>
+  <!-- Primary Model & Engine Deploy Card -->
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">Model & Backend Engine</div>
+      <div class="btn-group">
+        <button class="primary" onclick="startServer()">Deploy / Start</button>
+        <button class="danger" onclick="stopServer()">Stop Engine</button>
+      </div>
+    </div>
+
+    <div class="form-grid" style="margin-bottom: 16px;">
+      <div class="field" style="grid-column: span 2;">
+        <label>Selected GGUF Model</label>
+        <div style="display: flex; gap: 8px;">
+          <select id="chosenModel" class="mono" onchange="suggestAlias()"></select>
+          <button class="subtle" onclick="loadModels()">Scan</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>Backend Engine</label>
+        <select id="backendEngine" onchange="onBackendChange()">
+          <option value="llama.cpp" selected>llama.cpp (Standard / High-perf)</option>
+          <option value="koboldcpp">KoboldCpp (Enhanced Context / CUDA)</option>
+          <option value="ollama">Ollama (Modelfile / Host)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Model Alias <span class="badge">OpenAI endpoint</span></label>
+        <input id="alias" class="mono" value="local-qwen">
+      </div>
+    </div>
+
+    <!-- Quick Parameters -->
+    <div class="form-grid">
+      <div class="field">
+        <label>GPU Layers Offload (-ngl)</label>
+        <input id="layers" type="number" min="0" max="200" value="8">
+      </div>
+      <div class="field">
+        <label>Context Size (-c)</label>
+        <input id="context" type="number" min="512" max="262144" step="512" value="8192">
+      </div>
+      <div class="field">
+        <label>CPU Threads (-t)</label>
+        <input id="threads" type="number" min="1" max="128" value="4">
+      </div>
+      <div class="field">
+        <label>Sampling Temp (--temp)</label>
+        <input id="temp" type="number" min="0.0" max="2.0" step="0.05" value="0.2">
+      </div>
+    </div>
+
+    <!-- Parameter Accordion: Advanced Performance -->
+    <details>
+      <summary>Performance & Batching Flags</summary>
+      <div class="content">
+        <div class="form-grid">
+          <div class="field">
+            <label>Prompt Batch Size (-b)</label>
+            <input id="batch" type="number" min="32" max="16384" step="128" value="2048">
+          </div>
+          <div class="field">
+            <label>Micro-Batch Size (-ub)</label>
+            <select id="ubatch">
+              <option value="128">128 (Ultra low VRAM)</option>
+              <option value="256" selected>256 (Balanced default)</option>
+              <option value="512">512 (High throughput)</option>
+              <option value="1024">1024 (Max throughput)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Flash Attention (-fa)</label>
+            <select id="flashAttn">
+              <option value="on" selected>ON (Recommended)</option>
+              <option value="off">OFF</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>KV Cache Precision (-ctk/-ctv)</label>
+            <select id="kvCache">
+              <option value="q8_0" selected>q8_0 (Save 50% VRAM, no loss)</option>
+              <option value="q4_0">q4_0 (Save 75% VRAM)</option>
+              <option value="f16">f16 (Uncompressed 16-bit)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <!-- Parameter Accordion: Sampling & Precision -->
+    <details>
+      <summary>Sampling & Generation Parameters</summary>
+      <div class="content">
+        <div class="form-grid">
+          <div class="field">
+            <label>Top-P (--top-p)</label>
+            <input id="top_p" type="number" min="0.0" max="1.0" step="0.05" value="0.95">
+          </div>
+          <div class="field">
+            <label>Top-K (--top-k)</label>
+            <input id="top_k" type="number" min="0" max="200" step="1" value="40">
+          </div>
+          <div class="field">
+            <label>Min-P (--min-p)</label>
+            <input id="min_p" type="number" min="0.0" max="1.0" step="0.01" value="0.05">
+          </div>
+          <div class="field">
+            <label>Repeat Penalty</label>
+            <input id="repeat_penalty" type="number" min="0.0" max="2.0" step="0.05" value="1.05">
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <!-- Parameter Accordion: Multi-GPU & Engine Specific -->
+    <details>
+      <summary>Multi-GPU & Custom Engine Flags</summary>
+      <div class="content">
+        <div class="form-grid" style="margin-bottom: 12px;">
+          <div class="field">
+            <label>Main GPU ID (--main-gpu)</label>
+            <input id="main_gpu" type="number" min="0" max="16" value="0">
+          </div>
+          <div class="field">
+            <label>Split Mode (-sm)</label>
+            <select id="split_mode">
+              <option value="layer" selected>Layer-by-layer (Default)</option>
+              <option value="row">Row-wise (Multi-card)</option>
+              <option value="none">None (Single card only)</option>
+            </select>
+          </div>
+          <div class="field" style="grid-column: span 2;">
+            <label>Custom Flags <span class="badge">Raw CLI args</span></label>
+            <input id="custom_flags" class="mono" placeholder="--no-mmap --mlock or extra engine parameters">
+          </div>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- Coding Assistants & Integrations Card -->
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">Coding Integrations & Workspace</div>
+      <div class="btn-group">
+        <button class="primary" onclick="launchAider()">Launch Aider</button>
+        <button class="subtle" onclick="launchOpenCode()">Launch OpenCode</button>
+      </div>
+    </div>
+    <div class="form-grid">
+      <div class="field" style="grid-column: span 3;">
+        <label>Active Project Workspace Directory</label>
+        <div style="display: flex; gap: 8px;">
+          <input id="projectDir" class="mono" placeholder="/home/user/workspace/project">
+          <button class="subtle" onclick="toggleDirBrowser()">Browse</button>
+        </div>
+        <div id="dirBrowser" class="dir-browser" style="display:none"></div>
+      </div>
+      <div class="field">
+        <label>Aider Edit Format</label>
         <select id="editFormat">
-          <option value="diff" selected>diff (standard)</option>
-          <option value="whole">whole (small files)</option>
-          <option value="udiff">udiff</option>
-          <option value="architect">architect</option>
-        </select>
-      </div>
-      <div class="field sm">
-        <label>Flash Attn</label>
-        <select id="flashAttn">
-          <option value="on" selected>ON (fast)</option>
-          <option value="off">OFF</option>
-        </select>
-      </div>
-      <div class="field sm">
-        <label>KV Cache</label>
-        <select id="kvCache">
-          <option value="q8_0" selected>q8_0 (save 50%)</option>
-          <option value="q4_0">q4_0 (save 75%)</option>
-          <option value="f16">f16 (default)</option>
-        </select>
-      </div>
-      <div class="field sm">
-        <label>Temp</label>
-        <input id="temp" type="number" min="0.0" max="2.0" step="0.1" value="0.2">
-      </div>
-      <div class="field sm">
-        <label>Micro-Batch</label>
-        <select id="ubatch">
-          <option value="128">128 (low VRAM)</option>
-          <option value="256" selected>256 (balanced)</option>
-          <option value="512">512 (default)</option>
+          <option value="diff" selected>diff (Standard recommended)</option>
+          <option value="whole">whole (Entire file replacement)</option>
+          <option value="udiff">udiff (Unified diff)</option>
+          <option value="architect">architect (Two-stage editor)</option>
         </select>
       </div>
     </div>
   </div>
-</details>
 
-<!-- LOCAL MODELS -->
-<details>
-  <summary>Local Models</summary>
-  <div class="content">
-    <div id="modelDir" style="color:var(--dim);font-size:11px;margin-bottom:8px"></div>
-    <div id="modelList">Scanning...</div>
-  </div>
-</details>
-
-<!-- HF DISCOVER -->
-<details>
-  <summary>Hugging Face</summary>
-  <div class="content">
-    <div class="row" style="margin-bottom:12px">
-      <div class="field grow"><input id="search" value="Qwen3.5" placeholder="Search models..."></div>
-      <button onclick="searchHF()">Search</button>
+  <!-- Local Models & Hugging Face Catalog Tabs -->
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">Model Storage & Hugging Face Downloader</div>
     </div>
-    <div id="hfResults"></div>
-    <div style="margin-top:16px">
-      <div class="section-title">Downloads</div>
-      <div id="downloadList" style="color:var(--dim)">No downloads started</div>
+
+    <details open>
+      <summary>Local GGUF Models</summary>
+      <div class="content">
+        <div id="modelDir" style="color:var(--text-dim); font-size:11.5px; margin-bottom:12px; font-family:var(--mono-font)"></div>
+        <div id="modelList">Scanning storage directory...</div>
+      </div>
+    </details>
+
+    <details>
+      <summary>Search & Download from Hugging Face</summary>
+      <div class="content">
+        <div style="display: flex; gap: 8px; margin-bottom: 14px;">
+          <input id="search" class="mono" value="Qwen2.5-Coder" placeholder="Search HF repo...">
+          <button class="primary" onclick="searchHF()">Search</button>
+        </div>
+        <div id="hfResults"></div>
+        <div style="margin-top: 16px;">
+          <div style="font-size: 11px; text-transform: uppercase; color: var(--text-dim); margin-bottom: 8px; font-weight: 600;">Active Downloads</div>
+          <div id="downloadList" style="color:var(--text-muted); font-size: 12px;">No downloads in queue.</div>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <!-- Live Logs Card -->
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">Server Console Logs</div>
+      <button class="subtle" onclick="loadLogs()">Refresh Logs</button>
     </div>
+    <pre id="logContent">Logs idle.</pre>
   </div>
-</details>
-
-<!-- LOGS -->
-<details>
-  <summary>Server Logs</summary>
-  <div class="content">
-    <div style="margin-bottom:8px"><button onclick="loadLogs()">Refresh</button></div>
-    <pre id="logContent">No logs loaded</pre>
-  </div>
-</details>
-
 </main>
-<footer>llm-dash · 127.0.0.1:7860 · local only</footer>
+
+<footer>llmCode · Cross-Platform Local LLM Hub · 127.0.0.1:7860</footer>
 
 <script>
-let localModels=[];
-let lastStatus={};
-let dirBrowserOpen=false;
-const $=id=>document.getElementById(id);
+let localModels = [];
+let dirBrowserOpen = false;
+let downloadsPollTimer = null;
+const $ = id => document.getElementById(id);
 
-function toast(t){
-  $('msg').textContent=t;$('msg').style.display='block';
-  setTimeout(()=>$('msg').style.display='none',7000);
+function toast(msg) {
+  const el = $('msg');
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 6000);
 }
 
-async function api(path,opt={}){
-  let r=await fetch('/api'+path,opt);
-  let data=await r.json();
-  if(!r.ok) throw new Error(data.detail||r.statusText);
+async function api(path, opt = {}) {
+  let r = await fetch('/api' + path, opt);
+  let data = await r.json();
+  if (!r.ok) throw new Error(data.detail || r.statusText);
   return data;
 }
-const post=(path,data)=>api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
 
-// STATUS
-async function refreshStatus(){
-  try{
-    let s=lastStatus=await api('/status');
-    let g=s.gpu;
+const post = (path, data) => api(path, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(data)
+});
 
-    // GPU
-    if(g.available){
-      $('gpuDot').className='dot on';
-      $('gpuText').textContent=`GPU: ${g.name} | ${g.used_mb}/${g.total_mb}MB | ${g.temperature_c}°C`;
-    }else{
-      $('gpuDot').className='dot off';
-      $('gpuText').textContent='GPU: not detected';
-    }
-
-    // RAM
-    if(s.ram.total_mb){
-      $('ramDot').className='dot on';
-      let used=Math.round((s.ram.total_mb-s.ram.available_mb)/1024*10)/10;
-      let total=Math.round(s.ram.total_mb/1024*10)/10;
-      $('ramText').textContent=`RAM: ${used}/${total} GB`;
-    }
-
-    // Server
-    if(s.health){
-      $('srvDot').className='dot on';
-      $('srvText').textContent=`Server: online | ${s.active?.alias||'unknown'} | :${s.server_port}`;
-    }else if(s.managed_running){
-      $('srvDot').className='dot warn';
-      $('srvText').textContent='Server: starting...';
-    }else{
-      $('srvDot').className='dot off';
-      $('srvText').textContent='Server: offline';
-    }
-
-    $('connection').textContent=s.binary_exists?'llama-server found':'binary missing';
-  }catch(e){toast('Status: '+e.message)}
+function onBackendChange() {
+  const be = $('backendEngine').value;
+  toast('Switched backend to ' + be);
 }
 
-async function refreshAider(){
-  try{
-    let a=await api('/aider/status');
-    if(a.running){
-      $('aiderDot').className='dot on';
-      $('aiderText').textContent='Aider: running (pid '+a.pid+')';
-    }else{
-      $('aiderDot').className='dot off';
-      $('aiderText').textContent=a.installed?'Aider: ready':'Aider: not installed';
+async function refreshStatus() {
+  try {
+    let s = await api('/status');
+    let g = s.gpu;
+    if (g.available) {
+      $('gpuDot').className = 'status-dot online';
+      $('gpuText').textContent = `${g.name} · ${g.used_mb}/${g.total_mb} MB (${g.temperature_c}°C)`;
+    } else {
+      $('gpuDot').className = 'status-dot offline';
+      $('gpuText').textContent = 'GPU Not Detected';
     }
-  }catch(e){}
+
+    if (s.ram && s.ram.total_mb) {
+      $('ramDot').className = 'status-dot online';
+      let used = Math.round((s.ram.total_mb - s.ram.available_mb) / 1024 * 10) / 10;
+      let total = Math.round(s.ram.total_mb / 1024 * 10) / 10;
+      $('ramText').textContent = `${used} / ${total} GB`;
+    }
+
+    if (s.health) {
+      $('srvDot').className = 'status-dot online';
+      $('srvText').textContent = `Ready · ${s.active?.alias || 'active'} (:${s.server_port})`;
+    } else if (s.managed_running) {
+      $('srvDot').className = 'status-dot warn';
+      $('srvText').textContent = 'Starting process...';
+    } else {
+      $('srvDot').className = 'status-dot offline';
+      $('srvText').textContent = 'Offline';
+    }
+
+    $('connection').textContent = s.binary_exists ? 'Backend Engine Ready' : 'Binary Not Installed';
+  } catch(e) {
+    $('connection').textContent = 'Connecting...';
+  }
 }
 
+async function refreshAider() {
+  try {
+    let a = await api('/aider/status');
+    if (a.running) {
+      $('aiderDot').className = 'status-dot online';
+      $('aiderText').textContent = `Running (pid ${a.pid})`;
+    } else {
+      $('aiderDot').className = 'status-dot offline';
+      $('aiderText').textContent = a.installed ? 'Installed & Ready' : 'Not Installed';
+    }
+  } catch(e) {}
+}
 
-// MODELS
-async function loadModels(){
-  try{
-    let d=await api('/models');
-    localModels=d.models;
-    $('modelDir').textContent='Directory: '+d.directory;
-    let sel=$('chosenModel');
+async function loadModels() {
+  try {
+    let d = await api('/models');
+    localModels = d.models;
+    $('modelDir').textContent = 'Path: ' + d.directory;
+    let sel = $('chosenModel');
     sel.replaceChildren();
-    let list=$('modelList');
+    let list = $('modelList');
     list.replaceChildren();
 
-    if(!localModels.length){
-      list.textContent='No GGUF files found.';
+    if (!localModels.length) {
+      list.textContent = 'No GGUF models discovered.';
       return;
     }
-    for(const m of localModels){
-      let o=document.createElement('option');
-      o.value=m.path;o.textContent=m.relative;
+
+    for (const m of localModels) {
+      let o = document.createElement('option');
+      o.value = m.path;
+      o.textContent = m.relative;
       sel.append(o);
-      let div=document.createElement('div');
-      div.className='model-item';
-      let name=document.createElement('span');
-      name.className='name';name.textContent=m.relative;
-      let size=document.createElement('span');
-      size.className='size';size.textContent=m.size_gb+' GB';
-      let btn=document.createElement('button');
-      btn.textContent='Select';btn.disabled=m.mmproj;
-      btn.onclick=()=>{sel.value=m.path;suggestAlias();toast('Selected: '+m.relative)};
-      div.append(name,size,btn);
+
+      let div = document.createElement('div');
+      div.className = 'model-item';
+      let name = document.createElement('span');
+      name.className = 'model-name';
+      name.textContent = m.relative;
+      let size = document.createElement('span');
+      size.className = 'model-size';
+      size.textContent = m.size_gb + ' GB';
+      let btn = document.createElement('button');
+      btn.className = 'subtle';
+      btn.textContent = 'Select';
+      btn.disabled = m.mmproj;
+      btn.onclick = () => {
+        sel.value = m.path;
+        suggestAlias();
+        toast('Selected: ' + m.relative);
+      };
+      div.append(name, size, btn);
       list.append(div);
     }
     suggestAlias();
-  }catch(e){toast('Models: '+e.message)}
+  } catch(e) {
+    toast('Models: ' + e.message);
+  }
 }
 
-function suggestAlias(){
-  let f=$('chosenModel').selectedOptions[0]?.textContent||'local-qwen';
-  let name=f.replace(/.*\//,'').replace(/\.gguf$/i,'').toLowerCase().replace(/[^a-z0-9_.-]/g,'-').slice(0,70);
-  $('alias').value=name;
+function suggestAlias() {
+  let f = $('chosenModel').selectedOptions[0]?.textContent || 'local-qwen';
+  let name = f.replace(/.*\//, '').replace(/\.gguf$/i, '').toLowerCase().replace(/[^a-z0-9_.-]/g, '-').slice(0, 70);
+  $('alias').value = name;
 }
 
-// SERVER
-async function startServer(){
-  try{
-    let d=await post('/start',{
-      path:$('chosenModel').value,
-      backend:$('backendEngine').value,
-      alias:$('alias').value,
-      layers:+$('layers').value,
-      context:+$('context').value,
-      threads:+$('threads').value,
-      flash_attn:$('flashAttn').value,
-      kv_cache:$('kvCache').value,
-      temp:+$('temp').value,
-      ubatch:+$('ubatch').value,
-    });
-    toast('Server started (pid '+d.pid+')');
+function getDeployPayload() {
+  return {
+    path: $('chosenModel').value,
+    backend: $('backendEngine').value,
+    alias: $('alias').value,
+    layers: +$('layers').value,
+    context: +$('context').value,
+    threads: +$('threads').value,
+    batch: +$('batch').value,
+    ubatch: +$('ubatch').value,
+    flash_attn: $('flashAttn').value,
+    kv_cache: $('kvCache').value,
+    temp: +$('temp').value,
+    top_p: +$('top_p').value,
+    top_k: +$('top_k').value,
+    min_p: +$('min_p').value,
+    repeat_penalty: +$('repeat_penalty').value,
+    main_gpu: +$('main_gpu').value,
+    split_mode: $('split_mode').value,
+    custom_flags: $('custom_flags').value,
+  };
+}
+
+async function startServer() {
+  try {
+    let payload = getDeployPayload();
+    let d = await post('/start', payload);
+    toast('Server started successfully (pid ' + d.pid + ')');
     refreshStatus();
-  }catch(e){toast('Start: '+e.message)}
+  } catch(e) {
+    toast('Start Error: ' + e.message);
+  }
 }
 
-async function stopServer(){
-  if(!confirm('Stop llama-server?'))return;
-  try{
-    let x=await post('/stop',{});
-    toast(x.message);refreshStatus();
-  }catch(e){toast(e.message)}
+async function stopServer() {
+  if (!confirm('Stop backend engine?')) return;
+  try {
+    let x = await post('/stop', {});
+    toast(x.message);
+    refreshStatus();
+  } catch(e) {
+    toast(e.message);
+  }
 }
 
-// CLI LAUNCHERS
-async function launchAider(){
-  let dir=$('projectDir').value.trim();
-  if(!dir){toast('Enter a project directory');return}
-  try{
-    let d=await post('/aider/launch',{
-      project_dir:dir,
-      model_path:$('chosenModel').value,
-      alias:$('alias').value,
-      layers:+$('layers').value,
-      context:+$('context').value,
-      threads:+$('threads').value,
-      flash_attn:$('flashAttn').value,
-      kv_cache:$('kvCache').value,
-      temp:+$('temp').value,
-      ubatch:+$('ubatch').value,
-      edit_format:$('editFormat').value,
+async function launchAider() {
+  let dir = $('projectDir').value.trim();
+  if (!dir) { toast('Please specify a project directory'); return; }
+  try {
+    let payload = Object.assign(getDeployPayload(), {
+      project_dir: dir,
+      model_path: $('chosenModel').value,
+      edit_format: $('editFormat').value,
     });
+    let d = await post('/aider/launch', payload);
     toast(d.message);
-    refreshStatus();refreshAider();
-  }catch(e){toast('Launch: '+e.message)}
+    refreshStatus();
+    refreshAider();
+  } catch(e) {
+    toast('Aider Launch: ' + e.message);
+  }
 }
 
-
-// DIRECTORY BROWSER
-function toggleDirBrowser(){
-  dirBrowserOpen=!dirBrowserOpen;
-  $('dirBrowser').style.display=dirBrowserOpen?'block':'none';
-  if(dirBrowserOpen) browseTo($('projectDir').value||'');
+async function launchOpenCode() {
+  let dir = $('projectDir').value.trim();
+  if (!dir) { toast('Please specify a project directory'); return; }
+  try {
+    let payload = Object.assign(getDeployPayload(), {
+      project_dir: dir,
+      model_path: $('chosenModel').value,
+    });
+    let d = await post('/opencode/launch', payload);
+    toast(d.message);
+    refreshStatus();
+  } catch(e) {
+    toast('OpenCode Launch: ' + e.message);
+  }
 }
 
-async function browseTo(path){
-  try{
-    let d=await api('/directories?base='+encodeURIComponent(path));
-    let root=$('dirBrowser');
+function toggleDirBrowser() {
+  dirBrowserOpen = !dirBrowserOpen;
+  $('dirBrowser').style.display = dirBrowserOpen ? 'block' : 'none';
+  if (dirBrowserOpen) browseTo($('projectDir').value || '');
+}
+
+async function browseTo(path) {
+  try {
+    let d = await api('/directories?base=' + encodeURIComponent(path));
+    let root = $('dirBrowser');
     root.replaceChildren();
-    // parent
-    let parent=document.createElement('div');
-    parent.className='dir-entry dir-parent';
-    parent.textContent='.. ('+d.parent+')';
-    parent.onclick=()=>browseTo(d.parent);
+
+    let parent = document.createElement('div');
+    parent.className = 'dir-entry';
+    parent.style.color = 'var(--amber)';
+    parent.textContent = '.. ' + d.parent;
+    parent.onclick = () => browseTo(d.parent);
     root.append(parent);
-    // select current
-    let sel=document.createElement('div');
-    sel.className='dir-entry';
-    sel.style.color='var(--green)';sel.style.fontWeight='bold';
-    sel.textContent='>> Select: '+d.current;
-    sel.onclick=()=>{$('projectDir').value=d.current;dirBrowserOpen=false;$('dirBrowser').style.display='none'};
+
+    let sel = document.createElement('div');
+    sel.className = 'dir-entry';
+    sel.style.color = 'var(--emerald)';
+    sel.style.fontWeight = '600';
+    sel.textContent = 'Select: ' + d.current;
+    sel.onclick = () => {
+      $('projectDir').value = d.current;
+      dirBrowserOpen = false;
+      $('dirBrowser').style.display = 'none';
+    };
     root.append(sel);
-    // children
-    for(let dir of d.directories){
-      let entry=document.createElement('div');
-      entry.className='dir-entry';
-      entry.textContent=dir.name+'/';
-      entry.onclick=()=>browseTo(dir.path);
+
+    for (let dir of d.directories) {
+      let entry = document.createElement('div');
+      entry.className = 'dir-entry';
+      entry.textContent = dir.name + '/';
+      entry.onclick = () => browseTo(dir.path);
       root.append(entry);
     }
-  }catch(e){toast(e.message)}
+  } catch(e) {
+    toast(e.message);
+  }
 }
 
-// HF SEARCH
-async function searchHF(){
-  try{
-    let q=$('search').value;
-    let d=await api('/hf/search?q='+encodeURIComponent(q));
-    let root=$('hfResults');root.replaceChildren();
-    for(let m of d.models){
-      let div=document.createElement('div');div.className='hf-item';
-      let title=document.createElement('strong');title.textContent=m.id;
-      let info=document.createElement('span');
-      info.style.color='var(--dim)';
-      info.textContent=`${m.downloads.toLocaleString()} downloads · ${m.likes} likes${m.gated?' · gated':''}`;
-      let btn=document.createElement('button');btn.textContent='Files';btn.style.marginTop='6px';
-      btn.onclick=()=>viewFiles(m.id,div);
-      div.append(title,info,document.createElement('br'),btn);root.append(div);
-    }
-    if(!d.models.length)root.textContent='No results.';
-  }catch(e){toast('HF: '+e.message)}
-}
+async function searchHF() {
+  try {
+    let q = $('search').value;
+    let d = await api('/hf/search?q=' + encodeURIComponent(q));
+    let root = $('hfResults');
+    root.replaceChildren();
+    for (let m of d.models) {
+      let div = document.createElement('div');
+      div.className = 'model-item';
+      div.style.flexDirection = 'column';
+      div.style.alignItems = 'flex-start';
+      div.style.gap = '6px';
 
-async function viewFiles(repo,box){
-  try{
-    let d=await api('/hf/files?repo='+encodeURIComponent(repo));
-    let old=box.querySelector('.hf-files');if(old)old.remove();
-    let content=document.createElement('div');content.className='hf-files';
-    for(let file of d.files){
-      let row=document.createElement('div');row.className='hf-file';
-      let label=document.createElement('span');label.textContent=`${file.filename} · ${file.size_gb} GB`;
-      let btn=document.createElement('button');btn.textContent='Download';
-      btn.onclick=async()=>{
-        if(!confirm('Download '+file.filename+'?'))return;
-        try{await post('/hf/download',{repo,filename:file.filename});toast('Download started');pollDownloadsLoop()}
-        catch(e){toast(e.message)}
-      };
-      row.append(label,btn);content.append(row);
-    }
-    if(!d.files.length)content.textContent='No GGUF files found.';
-    box.append(content);
-  }catch(e){toast(e.message)}
-}
+      let head = document.createElement('div');
+      head.style.display = 'flex';
+      head.style.justifyContent = 'space-between';
+      head.style.width = '100%';
 
-let prevCompleted=new Set();
-let isFirstDownloadsLoad=true;
-let downloadsPollTimer=null;
+      let title = document.createElement('strong');
+      title.textContent = m.id;
+      let info = document.createElement('span');
+      info.style.color = 'var(--text-dim)';
+      info.textContent = `${m.downloads.toLocaleString()} dl · ${m.likes} likes`;
+      head.append(title, info);
 
-async function loadDownloads(){
-  try{
-    let d=await api('/downloads'),root=$('downloadList');root.replaceChildren();
-    let hasActive=false;
-    let anyNewComplete=false;
-    for(let f of d.downloads){
-      if(f.state==='downloading') hasActive=true;
-      if(f.state==='complete'){
-        if(!isFirstDownloadsLoad && !prevCompleted.has(f.id)){
-          anyNewComplete=true;
-        }
-        prevCompleted.add(f.id);
-      }
-      let div=document.createElement('div');div.style.marginBottom='8px';
-      let head=document.createElement('div');head.textContent=f.repo+'/'+f.filename;
-      let info=document.createElement('div');info.style.color='var(--dim)';info.style.fontSize='11px';
-      info.textContent=`${f.state} · ${(f.received/1e9).toFixed(2)} GB${f.total?' / '+(f.total/1e9).toFixed(2)+' GB':''}${f.error?' · '+f.error:''}`;
-      div.append(head,info);
-      if(f.total){let pg=document.createElement('progress');pg.max=f.total;pg.value=f.received;div.append(pg)}
+      let btn = document.createElement('button');
+      btn.className = 'subtle';
+      btn.textContent = 'Explore Files';
+      btn.onclick = () => viewFiles(m.id, div);
+
+      div.append(head, btn);
       root.append(div);
     }
-    isFirstDownloadsLoad=false;
-    if(!d.downloads.length)root.textContent='No downloads started';
-    if(anyNewComplete) loadModels();
+    if (!d.models.length) root.textContent = 'No matching models found.';
+  } catch(e) {
+    toast('HF: ' + e.message);
+  }
+}
+
+async function viewFiles(repo, box) {
+  try {
+    let d = await api('/hf/files?repo=' + encodeURIComponent(repo));
+    let old = box.querySelector('.hf-files');
+    if (old) old.remove();
+    let content = document.createElement('div');
+    content.className = 'hf-files';
+    content.style.width = '100%';
+    content.style.marginTop = '8px';
+    content.style.borderTop = '1px solid var(--card-border)';
+    content.style.paddingTop = '8px';
+
+    for (let file of d.files) {
+      let row = document.createElement('div');
+      row.style.display = 'flex';
+      row.style.justifyContent = 'space-between';
+      row.style.alignItems = 'center';
+      row.style.margin = '4px 0';
+      row.style.fontSize = '12px';
+
+      let label = document.createElement('span');
+      label.textContent = `${file.filename} (${file.size_gb} GB)`;
+      let btn = document.createElement('button');
+      btn.className = 'subtle';
+      btn.textContent = 'Download';
+      btn.onclick = async () => {
+        if (!confirm('Download ' + file.filename + '?')) return;
+        try {
+          await post('/hf/download', { repo, filename: file.filename });
+          toast('Download initiated');
+          pollDownloadsLoop();
+        } catch(e) { toast(e.message); }
+      };
+      row.append(label, btn);
+      content.append(row);
+    }
+    if (!d.files.length) content.textContent = 'No GGUF models found in repository.';
+    box.append(content);
+  } catch(e) {
+    toast(e.message);
+  }
+}
+
+async function loadDownloads() {
+  try {
+    let d = await api('/downloads');
+    let root = $('downloadList');
+    root.replaceChildren();
+    let hasActive = false;
+    for (let f of d.downloads) {
+      if (f.state === 'downloading') hasActive = true;
+      let div = document.createElement('div');
+      div.style.marginBottom = '8px';
+      let head = document.createElement('div');
+      head.textContent = `${f.repo}/${f.filename}`;
+      let info = document.createElement('div');
+      info.style.color = 'var(--text-dim)';
+      info.textContent = `${f.state} · ${(f.received/1e9).toFixed(2)} GB / ${(f.total/1e9).toFixed(2)} GB (${f.speed_mb_s || 0} MB/s)`;
+      div.append(head, info);
+      root.append(div);
+    }
+    if (!d.downloads.length) root.textContent = 'No downloads active.';
     return hasActive;
-  }catch(e){toast(e.message);return false;}
+  } catch(e) { return false; }
 }
 
-async function pollDownloadsLoop(){
+async function pollDownloadsLoop() {
   clearTimeout(downloadsPollTimer);
-  let active=await loadDownloads();
-  let nextDelay=active?1000:5000;
-  downloadsPollTimer=setTimeout(pollDownloadsLoop,nextDelay);
+  let active = await loadDownloads();
+  downloadsPollTimer = setTimeout(pollDownloadsLoop, active ? 1000 : 5000);
 }
 
-// LOGS
-async function loadLogs(){
-  try{let d=await api('/logs');$('logContent').textContent=d.text}catch(e){toast(e.message)}
+async function loadLogs() {
+  try {
+    let d = await api('/logs');
+    $('logContent').textContent = d.text;
+  } catch(e) {
+    toast(e.message);
+  }
 }
 
-// INIT
-async function init(){
-  await Promise.all([refreshStatus(),refreshAider(),loadModels(),loadDownloads()]);
+async function init() {
+  await Promise.all([refreshStatus(), refreshAider(), loadModels(), loadDownloads()]);
   pollDownloadsLoop();
-  // Load saved settings
-  try{
-    let s=await api('/settings');
-    if(s.last_project_dir)$('projectDir').value=s.last_project_dir;
-    if(s.last_layers)$('layers').value=s.last_layers;
-    if(s.last_context)$('context').value=s.last_context;
-    if(s.last_threads)$('threads').value=s.last_threads;
-    if(s.last_flash_attn)$('flashAttn').value=s.last_flash_attn;
-    if(s.last_kv_cache)$('kvCache').value=s.last_kv_cache;
-    if(s.last_temp!==undefined)$('temp').value=s.last_temp;
-    if(s.last_ubatch)$('ubatch').value=s.last_ubatch;
-    if(s.last_edit_format)$('editFormat').value=s.last_edit_format;
-  }catch(e){}
+  try {
+    let s = await api('/settings');
+    if (s.last_project_dir) $('projectDir').value = s.last_project_dir;
+    if (s.last_backend) $('backendEngine').value = s.last_backend;
+    if (s.last_alias) $('alias').value = s.last_alias;
+    if (s.last_layers) $('layers').value = s.last_layers;
+    if (s.last_context) $('context').value = s.last_context;
+    if (s.last_threads) $('threads').value = s.last_threads;
+    if (s.last_batch) $('batch').value = s.last_batch;
+    if (s.last_ubatch) $('ubatch').value = s.last_ubatch;
+    if (s.last_flash_attn) $('flashAttn').value = s.last_flash_attn;
+    if (s.last_kv_cache) $('kvCache').value = s.last_kv_cache;
+    if (s.last_temp !== undefined) $('temp').value = s.last_temp;
+    if (s.last_top_p !== undefined) $('top_p').value = s.last_top_p;
+    if (s.last_top_k !== undefined) $('top_k').value = s.last_top_k;
+    if (s.last_min_p !== undefined) $('min_p').value = s.last_min_p;
+    if (s.last_repeat_penalty !== undefined) $('repeat_penalty').value = s.last_repeat_penalty;
+    if (s.last_main_gpu !== undefined) $('main_gpu').value = s.last_main_gpu;
+    if (s.last_split_mode) $('split_mode').value = s.last_split_mode;
+    if (s.last_custom_flags) $('custom_flags').value = s.last_custom_flags;
+    if (s.last_edit_format) $('editFormat').value = s.last_edit_format;
+  } catch(e) {}
 }
+
 init();
-setInterval(()=>{refreshStatus();refreshAider()},5000);
+setInterval(() => { refreshStatus(); refreshAider(); }, 5000);
 </script>
-</body></html>
+</body>
+</html>
