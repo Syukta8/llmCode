@@ -12,10 +12,20 @@ Seamlessly connect local open-weight models (`llama.cpp`, `KoboldCpp`, `Ollama`)
 - **Windows**: Windows 10/11, Python 3.10+, NVIDIA Driver.
 
 ### 2. Setup Environment & Binaries
-One command sets up the Python virtual environment and local backend binaries:
+Standardized cross-platform installer:
 
 ```bash
-# Linux or Windows:
+# Linux:
+./setup.sh
+# or launch dashboard directly:
+./setup.sh run
+
+# Windows:
+setup.bat
+# or launch dashboard directly:
+setup.bat run
+
+# Or direct Python CLI:
 python llmcode.py setup
 ```
 *(On Windows, this automatically resolves or downloads pre-built CUDA `llama-server.exe` binaries into `bin/windows/`)*.
