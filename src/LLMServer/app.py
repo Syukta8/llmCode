@@ -188,12 +188,34 @@ def system_status():
     except Exception: pass
     mem={}
     try:
-        rows={}
-        for line in Path('/proc/meminfo').read_text().splitlines():
-            k,_,v=line.partition(':'); rows[k]=int(v.strip().split()[0])
-        mem={'total_mb':rows['MemTotal']//1024,'available_mb':rows['MemAvailable']//1024}
+        if os.name == 'nt':
+            import ctypes
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ('dwLength', ctypes.c_ulong),
+                    ('dwMemoryLoad', ctypes.c_ulong),
+                    ('ullTotalPhys', ctypes.c_ulonglong),
+                    ('ullAvailPhys', ctypes.c_ulonglong),
+                    ('ullTotalPageFile', ctypes.c_ulonglong),
+                    ('ullAvailPageFile', ctypes.c_ulonglong),
+                    ('ullTotalVirtual', ctypes.c_ulonglong),
+                    ('ullAvailVirtual', ctypes.c_ulonglong),
+                    ('sullAvailExtendedVirtual', ctypes.c_ulonglong),
+                ]
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                mem = {
+                    'total_mb': int(stat.ullTotalPhys // (1024 * 1024)),
+                    'available_mb': int(stat.ullAvailPhys // (1024 * 1024))
+                }
+        else:
+            rows={}
+            for line in Path('/proc/meminfo').read_text().splitlines():
+                k,_,v=line.partition(':'); rows[k]=int(v.strip().split()[0])
+            mem={'total_mb':rows['MemTotal']//1024,'available_mb':rows['MemAvailable']//1024}
     except Exception: pass
-    return {'gpu':gpu,'ram':mem,'binary':str(SERVER_BIN),'binary_exists':SERVER_BIN.is_file(),'model_dir':str(MODEL_DIR),'model_dir_exists':MODEL_DIR.is_dir(),'server_port':PORT}
+    return {'gpu':gpu,'ram':mem,'binary':str(SERVER_BIN),'binary_exists':SERVER_BIN.is_file(),'model_dir':str(MODEL_DIR),'model_dir_exists':MODEL_DIR.is_dir(),'server_port':PORT, 'platform': sys.platform}
 
 @app.get('/',response_class=HTMLResponse)
 def index():
@@ -225,7 +247,7 @@ def launch_backend_process(backend, path, params):
         if not KOBOLD_BIN.is_file():
             raise HTTPException(400, f'koboldcpp not found at {KOBOLD_BIN}')
         args = [
-            'python3', str(KOBOLD_BIN), '--model', str(path),
+            sys.executable, str(KOBOLD_BIN), '--model', str(path),
             '--port', str(PORT),
             '--contextsize', str(params.context),
             '--gpulayers', str(params.layers),
