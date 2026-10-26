@@ -1,0 +1,26 @@
+# Python & Virtualenv
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+
+# Builds, binaries, submodules
+src/llama.cpp/
+src/koboldcpp/
+bin/ollama_dist/
+bin/ollama
+
+# Logs & Runtime State
+logs/
+*.log
+*.pid
+
+# Models & Large binary artifacts
+models/
+*.gguf
+*.bin
+*.so
+*.dll
+*.exe

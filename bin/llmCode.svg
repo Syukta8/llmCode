@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <rect width="128" height="128" rx="24" fill="#0a0a0a" stroke="#00ff41" stroke-width="4"/>
+  <!-- Terminal title bar line -->
+  <line x1="12" y1="32" x2="116" y2="32" stroke="#1a3a1a" stroke-width="2"/>
+  <circle cx="24" cy="20" r="4" fill="#ff3333"/>
+  <circle cx="36" cy="20" r="4" fill="#ffb000"/>
+  <circle cx="48" cy="20" r="4" fill="#00ff41"/>
+  <!-- Prompt symbol > -->
+  <path d="M 28 54 L 46 68 L 28 82" fill="none" stroke="#00ff41" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Block cursor _ -->
+  <rect x="56" y="74" width="22" height="6" fill="#00ff41" rx="2"/>
+  <!-- AI chip / brain circuitry accent in dim green -->
+  <circle cx="96" cy="62" r="5" fill="none" stroke="#2a6b3f" stroke-width="2"/>
+  <circle cx="96" cy="86" r="5" fill="none" stroke="#2a6b3f" stroke-width="2"/>
+  <path d="M 82 74 L 91 74 M 96 67 L 96 81 M 101 74 L 110 74" stroke="#2a6b3f" stroke-width="2"/>
+  <!-- Text llm -->
+  <text x="64" y="112" font-family="monospace" font-size="14" font-weight="bold" fill="#00ff41" text-anchor="middle" letter-spacing="2">LLM-DASH</text>
+</svg>

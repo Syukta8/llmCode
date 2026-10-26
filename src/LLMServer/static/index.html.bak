@@ -1,0 +1,506 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>llm-dash</title><style>
+:root{
+  --green:#00ff41;--dim:#2a6b3f;--amber:#ffb000;--red:#ff3333;
+  --bg:#0a0a0a;--panel:#111;--border:#1a3a1a;
+  font-family:'JetBrains Mono','Fira Code','Cascadia Code',monospace;
+  color:var(--green);background:var(--bg);font-size:13px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{min-height:100vh}
+button,input,select{font:inherit;color:var(--green);background:var(--bg);border:1px solid var(--dim);border-radius:4px;padding:7px 12px}
+button{cursor:pointer;text-transform:uppercase;font-size:11px;letter-spacing:1px;transition:all .15s}
+button:hover{background:var(--green);color:var(--bg)}
+button:disabled{opacity:.4;cursor:not-allowed}
+button.danger{border-color:var(--red);color:var(--red)}
+button.danger:hover{background:var(--red);color:var(--bg)}
+button.amber{border-color:var(--amber);color:var(--amber)}
+button.amber:hover{background:var(--amber);color:var(--bg)}
+input,select{width:100%}
+select option{background:var(--bg);color:var(--green)}
+
+/* layout */
+header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+h1{font-size:20px;font-weight:700;letter-spacing:2px}
+main{max-width:960px;margin:0 auto;padding:20px 24px}
+.status-bar{display:flex;gap:24px;padding:12px 0;border-bottom:1px solid var(--border);margin-bottom:20px;flex-wrap:wrap;font-size:12px}
+.status-bar .item{display:flex;gap:6px;align-items:center}
+.status-bar .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
+.dot.off{background:var(--red);box-shadow:0 0 4px var(--red)}
+.dot.warn{background:var(--amber);box-shadow:0 0 4px var(--amber)}
+
+/* controls */
+.section{margin-bottom:20px}
+.section-title{font-size:11px;text-transform:uppercase;letter-spacing:2px;color:var(--dim);margin-bottom:10px}
+.row{display:flex;gap:10px;align-items:end;flex-wrap:wrap}
+.field{display:flex;flex-direction:column;gap:4px}
+.field label{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--dim)}
+.field.grow{flex:1;min-width:200px}
+.field.sm{width:90px}
+.actions{display:flex;gap:8px;align-items:end;flex-wrap:wrap}
+
+/* model list */
+.model-item{padding:8px 12px;border:1px solid var(--border);border-radius:4px;margin:6px 0;display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:12px}
+.model-item:hover{border-color:var(--dim)}
+.model-item .name{flex:1;word-break:break-all}
+.model-item .size{color:var(--dim);white-space:nowrap}
+
+/* collapsible */
+details{border:1px solid var(--border);border-radius:4px;margin-bottom:16px}
+details>summary{padding:10px 14px;cursor:pointer;font-size:11px;text-transform:uppercase;letter-spacing:2px;color:var(--dim);list-style:none;display:flex;align-items:center;gap:8px}
+details>summary::before{content:'[+]'}
+details[open]>summary::before{content:'[-]'}
+details>.content{padding:14px}
+
+/* logs */
+pre{white-space:pre-wrap;word-break:break-all;background:#050505;color:var(--green);padding:14px;border-radius:4px;max-height:300px;overflow:auto;font-size:11px;border:1px solid var(--border)}
+
+/* toast */
+#msg{position:fixed;top:16px;right:16px;z-index:99;background:#0a0a0a;border:1px solid var(--amber);color:var(--amber);padding:10px 16px;border-radius:4px;display:none;max-width:400px;font-size:12px}
+
+/* dir browser */
+.dir-browser{max-height:250px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;margin-top:6px}
+.dir-entry{padding:6px 10px;cursor:pointer;font-size:12px;border-bottom:1px solid #111}
+.dir-entry:hover{background:#1a1a1a}
+.dir-parent{color:var(--amber)}
+
+/* hf search */
+.hf-item{border:1px solid var(--border);border-radius:4px;padding:10px;margin:6px 0;font-size:12px}
+.hf-item strong{display:block;margin-bottom:4px}
+.hf-files{margin-top:8px;padding-top:8px;border-top:1px solid var(--border)}
+.hf-file{display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:11px}
+progress{width:100%;height:8px;appearance:none;border:none;border-radius:2px}
+progress::-webkit-progress-bar{background:var(--bg);border:1px solid var(--border);border-radius:2px}
+progress::-webkit-progress-value{background:var(--green);border-radius:2px}
+
+footer{padding:16px 24px;text-align:center;color:var(--dim);font-size:10px;letter-spacing:1px}
+@media(max-width:700px){.row{flex-direction:column}.field.sm{width:100%}header{flex-direction:column;gap:8px}}
+</style></head><body>
+
+<header>
+  <h1>llmCode</h1>
+  <span id="connection" style="font-size:11px;color:var(--dim)">connecting...</span>
+</header>
+
+<main>
+<div id="msg"></div>
+
+<!-- STATUS BAR -->
+<div class="status-bar">
+  <div class="item"><span class="dot off" id="gpuDot"></span><span id="gpuText">GPU: detecting...</span></div>
+  <div class="item"><span class="dot off" id="ramDot"></span><span id="ramText">RAM: ...</span></div>
+  <div class="item"><span class="dot off" id="srvDot"></span><span id="srvText">Server: offline</span></div>
+  <div class="item"><span class="dot off" id="ocDot"></span><span id="ocText">OpenCode: ...</span></div>
+</div>
+
+<!-- MODEL SELECT -->
+<div class="section">
+  <div class="section-title">Model</div>
+  <div class="row">
+    <div class="field grow"><select id="chosenModel" onchange="suggestAlias()"></select></div>
+    <button class="amber" onclick="loadModels()">Scan</button>
+  </div>
+</div>
+
+<!-- PROJECT DIR -->
+<div class="section">
+  <div class="section-title">Project Directory</div>
+  <div class="row">
+    <div class="field grow"><input id="projectDir" placeholder="/home/user/projects/my-app"></div>
+    <button onclick="toggleDirBrowser()">Browse</button>
+  </div>
+  <div id="dirBrowser" class="dir-browser" style="display:none"></div>
+</div>
+
+<!-- SERVER SETTINGS + LAUNCH -->
+<div class="section">
+  <div class="section-title">Settings & Launch</div>
+  <div class="row">
+    <div class="field sm"><label>Alias</label><input id="alias" value="local-qwen"></div>
+    <div class="field sm"><label>GPU Layers</label><input id="layers" type="number" min="0" max="100" value="8"></div>
+    <div class="field sm"><label>Context</label><input id="context" type="number" min="512" value="8192"></div>
+    <div class="field sm"><label>Threads</label><input id="threads" type="number" min="1" max="32" value="4"></div>
+    <div class="actions">
+      <button onclick="launchOpenCode()">Launch OpenCode</button>
+      <button onclick="startServer()">Start Server</button>
+      <button class="danger" onclick="stopServer()">Stop Server</button>
+    </div>
+  </div>
+</div>
+
+<!-- ADVANCED TUNING -->
+<details>
+  <summary>Advanced Tuning</summary>
+  <div class="content">
+    <div class="row">
+      <div class="field sm">
+        <label>Flash Attn</label>
+        <select id="flashAttn">
+          <option value="on" selected>ON (fast)</option>
+          <option value="off">OFF</option>
+        </select>
+      </div>
+      <div class="field sm">
+        <label>KV Cache</label>
+        <select id="kvCache">
+          <option value="q8_0" selected>q8_0 (save 50%)</option>
+          <option value="q4_0">q4_0 (save 75%)</option>
+          <option value="f16">f16 (default)</option>
+        </select>
+      </div>
+      <div class="field sm">
+        <label>Temp</label>
+        <input id="temp" type="number" min="0.0" max="2.0" step="0.1" value="0.2">
+      </div>
+      <div class="field sm">
+        <label>Micro-Batch</label>
+        <select id="ubatch">
+          <option value="128">128 (low VRAM)</option>
+          <option value="256" selected>256 (balanced)</option>
+          <option value="512">512 (default)</option>
+        </select>
+      </div>
+    </div>
+  </div>
+</details>
+
+<!-- LOCAL MODELS -->
+<details>
+  <summary>Local Models</summary>
+  <div class="content">
+    <div id="modelDir" style="color:var(--dim);font-size:11px;margin-bottom:8px"></div>
+    <div id="modelList">Scanning...</div>
+  </div>
+</details>
+
+<!-- HF DISCOVER -->
+<details>
+  <summary>Hugging Face</summary>
+  <div class="content">
+    <div class="row" style="margin-bottom:12px">
+      <div class="field grow"><input id="search" value="Qwen3.5" placeholder="Search models..."></div>
+      <button onclick="searchHF()">Search</button>
+    </div>
+    <div id="hfResults"></div>
+    <div style="margin-top:16px">
+      <div class="section-title">Downloads</div>
+      <div id="downloadList" style="color:var(--dim)">No downloads started</div>
+    </div>
+  </div>
+</details>
+
+<!-- LOGS -->
+<details>
+  <summary>Server Logs</summary>
+  <div class="content">
+    <div style="margin-bottom:8px"><button onclick="loadLogs()">Refresh</button></div>
+    <pre id="logContent">No logs loaded</pre>
+  </div>
+</details>
+
+</main>
+<footer>llm-dash · 127.0.0.1:7860 · local only</footer>
+
+<script>
+let localModels=[];
+let lastStatus={};
+let dirBrowserOpen=false;
+const $=id=>document.getElementById(id);
+
+function toast(t){
+  $('msg').textContent=t;$('msg').style.display='block';
+  setTimeout(()=>$('msg').style.display='none',7000);
+}
+
+async function api(path,opt={}){
+  let r=await fetch('/api'+path,opt);
+  let data=await r.json();
+  if(!r.ok) throw new Error(data.detail||r.statusText);
+  return data;
+}
+const post=(path,data)=>api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+
+// STATUS
+async function refreshStatus(){
+  try{
+    let s=lastStatus=await api('/status');
+    let g=s.gpu;
+
+    // GPU
+    if(g.available){
+      $('gpuDot').className='dot on';
+      $('gpuText').textContent=`GPU: ${g.name} | ${g.used_mb}/${g.total_mb}MB | ${g.temperature_c}°C`;
+    }else{
+      $('gpuDot').className='dot off';
+      $('gpuText').textContent='GPU: not detected';
+    }
+
+    // RAM
+    if(s.ram.total_mb){
+      $('ramDot').className='dot on';
+      let used=Math.round((s.ram.total_mb-s.ram.available_mb)/1024*10)/10;
+      let total=Math.round(s.ram.total_mb/1024*10)/10;
+      $('ramText').textContent=`RAM: ${used}/${total} GB`;
+    }
+
+    // Server
+    if(s.health){
+      $('srvDot').className='dot on';
+      $('srvText').textContent=`Server: online | ${s.active?.alias||'unknown'} | :${s.server_port}`;
+    }else if(s.managed_running){
+      $('srvDot').className='dot warn';
+      $('srvText').textContent='Server: starting...';
+    }else{
+      $('srvDot').className='dot off';
+      $('srvText').textContent='Server: offline';
+    }
+
+    $('connection').textContent=s.binary_exists?'llama-server found':'binary missing';
+  }catch(e){toast('Status: '+e.message)}
+}
+
+async function refreshOpenCode(){
+  try{
+    let oc=await api('/opencode/status');
+    if(oc.running){
+      $('ocDot').className='dot on';
+      $('ocText').textContent='OpenCode: running (pid '+oc.pid+')';
+    }else{
+      $('ocDot').className='dot off';
+      $('ocText').textContent=oc.installed?'OpenCode: idle':'OpenCode: not installed';
+    }
+  }catch(e){}
+}
+
+// MODELS
+async function loadModels(){
+  try{
+    let d=await api('/models');
+    localModels=d.models;
+    $('modelDir').textContent='Directory: '+d.directory;
+    let sel=$('chosenModel');
+    sel.replaceChildren();
+    let list=$('modelList');
+    list.replaceChildren();
+
+    if(!localModels.length){
+      list.textContent='No GGUF files found.';
+      return;
+    }
+    for(const m of localModels){
+      let o=document.createElement('option');
+      o.value=m.path;o.textContent=m.relative;
+      sel.append(o);
+      let div=document.createElement('div');
+      div.className='model-item';
+      let name=document.createElement('span');
+      name.className='name';name.textContent=m.relative;
+      let size=document.createElement('span');
+      size.className='size';size.textContent=m.size_gb+' GB';
+      let btn=document.createElement('button');
+      btn.textContent='Select';btn.disabled=m.mmproj;
+      btn.onclick=()=>{sel.value=m.path;suggestAlias();toast('Selected: '+m.relative)};
+      div.append(name,size,btn);
+      list.append(div);
+    }
+    suggestAlias();
+  }catch(e){toast('Models: '+e.message)}
+}
+
+function suggestAlias(){
+  let f=$('chosenModel').selectedOptions[0]?.textContent||'local-qwen';
+  let name=f.replace(/.*\//,'').replace(/\.gguf$/i,'').toLowerCase().replace(/[^a-z0-9_.-]/g,'-').slice(0,70);
+  $('alias').value=name;
+}
+
+// SERVER
+async function startServer(){
+  try{
+    let d=await post('/start',{
+      path:$('chosenModel').value,
+      alias:$('alias').value,
+      layers:+$('layers').value,
+      context:+$('context').value,
+      threads:+$('threads').value,
+      flash_attn:$('flashAttn').value,
+      kv_cache:$('kvCache').value,
+      temp:+$('temp').value,
+      ubatch:+$('ubatch').value,
+    });
+    toast('Server started (pid '+d.pid+')');
+    refreshStatus();
+  }catch(e){toast('Start: '+e.message)}
+}
+
+async function stopServer(){
+  if(!confirm('Stop llama-server?'))return;
+  try{
+    let x=await post('/stop',{});
+    toast(x.message);refreshStatus();
+  }catch(e){toast(e.message)}
+}
+
+// CLI LAUNCHERS
+async function launchOpenCode(){
+  let dir=$('projectDir').value.trim();
+  if(!dir){toast('Enter a project directory');return}
+  try{
+    let d=await post('/opencode/launch',{
+      project_dir:dir,
+      model_path:$('chosenModel').value,
+      alias:$('alias').value,
+      layers:+$('layers').value,
+      context:+$('context').value,
+      threads:+$('threads').value,
+      flash_attn:$('flashAttn').value,
+      kv_cache:$('kvCache').value,
+      temp:+$('temp').value,
+      ubatch:+$('ubatch').value,
+    });
+    toast(d.message);
+    refreshStatus();refreshOpenCode();
+  }catch(e){toast('Launch: '+e.message)}
+}
+
+// DIRECTORY BROWSER
+function toggleDirBrowser(){
+  dirBrowserOpen=!dirBrowserOpen;
+  $('dirBrowser').style.display=dirBrowserOpen?'block':'none';
+  if(dirBrowserOpen) browseTo($('projectDir').value||'');
+}
+
+async function browseTo(path){
+  try{
+    let d=await api('/directories?base='+encodeURIComponent(path));
+    let root=$('dirBrowser');
+    root.replaceChildren();
+    // parent
+    let parent=document.createElement('div');
+    parent.className='dir-entry dir-parent';
+    parent.textContent='.. ('+d.parent+')';
+    parent.onclick=()=>browseTo(d.parent);
+    root.append(parent);
+    // select current
+    let sel=document.createElement('div');
+    sel.className='dir-entry';
+    sel.style.color='var(--green)';sel.style.fontWeight='bold';
+    sel.textContent='>> Select: '+d.current;
+    sel.onclick=()=>{$('projectDir').value=d.current;dirBrowserOpen=false;$('dirBrowser').style.display='none'};
+    root.append(sel);
+    // children
+    for(let dir of d.directories){
+      let entry=document.createElement('div');
+      entry.className='dir-entry';
+      entry.textContent=dir.name+'/';
+      entry.onclick=()=>browseTo(dir.path);
+      root.append(entry);
+    }
+  }catch(e){toast(e.message)}
+}
+
+// HF SEARCH
+async function searchHF(){
+  try{
+    let q=$('search').value;
+    let d=await api('/hf/search?q='+encodeURIComponent(q));
+    let root=$('hfResults');root.replaceChildren();
+    for(let m of d.models){
+      let div=document.createElement('div');div.className='hf-item';
+      let title=document.createElement('strong');title.textContent=m.id;
+      let info=document.createElement('span');
+      info.style.color='var(--dim)';
+      info.textContent=`${m.downloads.toLocaleString()} downloads · ${m.likes} likes${m.gated?' · gated':''}`;
+      let btn=document.createElement('button');btn.textContent='Files';btn.style.marginTop='6px';
+      btn.onclick=()=>viewFiles(m.id,div);
+      div.append(title,info,document.createElement('br'),btn);root.append(div);
+    }
+    if(!d.models.length)root.textContent='No results.';
+  }catch(e){toast('HF: '+e.message)}
+}
+
+async function viewFiles(repo,box){
+  try{
+    let d=await api('/hf/files?repo='+encodeURIComponent(repo));
+    let old=box.querySelector('.hf-files');if(old)old.remove();
+    let content=document.createElement('div');content.className='hf-files';
+    for(let file of d.files){
+      let row=document.createElement('div');row.className='hf-file';
+      let label=document.createElement('span');label.textContent=`${file.filename} · ${file.size_gb} GB`;
+      let btn=document.createElement('button');btn.textContent='Download';
+      btn.onclick=async()=>{
+        if(!confirm('Download '+file.filename+'?'))return;
+        try{await post('/hf/download',{repo,filename:file.filename});toast('Download started');pollDownloadsLoop()}
+        catch(e){toast(e.message)}
+      };
+      row.append(label,btn);content.append(row);
+    }
+    if(!d.files.length)content.textContent='No GGUF files found.';
+    box.append(content);
+  }catch(e){toast(e.message)}
+}
+
+let prevCompleted=new Set();
+let isFirstDownloadsLoad=true;
+let downloadsPollTimer=null;
+
+async function loadDownloads(){
+  try{
+    let d=await api('/downloads'),root=$('downloadList');root.replaceChildren();
+    let hasActive=false;
+    let anyNewComplete=false;
+    for(let f of d.downloads){
+      if(f.state==='downloading') hasActive=true;
+      if(f.state==='complete'){
+        if(!isFirstDownloadsLoad && !prevCompleted.has(f.id)){
+          anyNewComplete=true;
+        }
+        prevCompleted.add(f.id);
+      }
+      let div=document.createElement('div');div.style.marginBottom='8px';
+      let head=document.createElement('div');head.textContent=f.repo+'/'+f.filename;
+      let info=document.createElement('div');info.style.color='var(--dim)';info.style.fontSize='11px';
+      info.textContent=`${f.state} · ${(f.received/1e9).toFixed(2)} GB${f.total?' / '+(f.total/1e9).toFixed(2)+' GB':''}${f.error?' · '+f.error:''}`;
+      div.append(head,info);
+      if(f.total){let pg=document.createElement('progress');pg.max=f.total;pg.value=f.received;div.append(pg)}
+      root.append(div);
+    }
+    isFirstDownloadsLoad=false;
+    if(!d.downloads.length)root.textContent='No downloads started';
+    if(anyNewComplete) loadModels();
+    return hasActive;
+  }catch(e){toast(e.message);return false;}
+}
+
+async function pollDownloadsLoop(){
+  clearTimeout(downloadsPollTimer);
+  let active=await loadDownloads();
+  let nextDelay=active?1000:5000;
+  downloadsPollTimer=setTimeout(pollDownloadsLoop,nextDelay);
+}
+
+// LOGS
+async function loadLogs(){
+  try{let d=await api('/logs');$('logContent').textContent=d.text}catch(e){toast(e.message)}
+}
+
+// INIT
+async function init(){
+  await Promise.all([refreshStatus(),refreshOpenCode(),loadModels(),loadDownloads()]);
+  pollDownloadsLoop();
+  // Load saved settings
+  try{
+    let s=await api('/settings');
+    if(s.last_project_dir)$('projectDir').value=s.last_project_dir;
+    if(s.last_layers)$('layers').value=s.last_layers;
+    if(s.last_context)$('context').value=s.last_context;
+    if(s.last_threads)$('threads').value=s.last_threads;
+    if(s.last_flash_attn)$('flashAttn').value=s.last_flash_attn;
+    if(s.last_kv_cache)$('kvCache').value=s.last_kv_cache;
+    if(s.last_temp!==undefined)$('temp').value=s.last_temp;
+    if(s.last_ubatch)$('ubatch').value=s.last_ubatch;
+  }catch(e){}
+}
+init();
+setInterval(()=>{refreshStatus();refreshOpenCode()},5000);
+</script>
+</body></html>
