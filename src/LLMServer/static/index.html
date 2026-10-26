@@ -388,15 +388,15 @@
     <div class="form-grid">
       <div class="field">
         <label>GPU Layers Offload (-ngl)</label>
-        <input id="layers" type="number" min="0" max="200" value="8">
+        <input id="layers" type="number" min="0" max="999" value="8">
       </div>
       <div class="field">
         <label>Context Size (-c)</label>
-        <input id="context" type="number" min="512" max="262144" step="512" value="8192">
+        <input id="context" type="number" min="512" max="1048576" step="512" value="8192">
       </div>
       <div class="field">
         <label>CPU Threads (-t)</label>
-        <input id="threads" type="number" min="1" max="128" value="4">
+        <input id="threads" type="number" min="1" max="256" value="4">
       </div>
       <div class="field">
         <label>Sampling Temp (--temp)</label>
@@ -568,7 +568,14 @@
   <div class="card">
     <div class="card-header">
       <div class="card-title">Server Console Logs</div>
-      <button class="subtle" onclick="loadLogs()">Refresh Logs</button>
+      <div class="btn-group">
+        <select id="logSource" onchange="loadLogs()" style="width:auto; padding:5px 10px; font-size:12px;">
+          <option value="engine" selected>Engine Log (llama-server.log)</option>
+          <option value="daemon">Dashboard Log (llmserver-daemon.log)</option>
+        </select>
+        <button class="subtle" onclick="loadLogs()">Refresh</button>
+        <button class="subtle" onclick="clearLogs()">Clear</button>
+      </div>
     </div>
     <pre id="logContent">Logs idle.</pre>
   </div>
@@ -592,7 +599,17 @@ function toast(msg) {
 async function api(path, opt = {}) {
   let r = await fetch('/api' + path, opt);
   let data = await r.json();
-  if (!r.ok) throw new Error(data.detail || r.statusText);
+  if (!r.ok) {
+    let errText = r.statusText;
+    if (typeof data.detail === 'string') {
+      errText = data.detail;
+    } else if (Array.isArray(data.detail)) {
+      errText = data.detail.map(e => `${(e.loc || []).slice(-1)[0]}: ${e.msg}`).join('; ');
+    } else if (data.detail) {
+      errText = JSON.stringify(data.detail);
+    }
+    throw new Error(errText);
+  }
   return data;
 }
 
@@ -705,8 +722,8 @@ async function loadModels() {
 
 function suggestAlias() {
   let f = $('chosenModel').selectedOptions[0]?.textContent || 'local-qwen';
-  let name = f.replace(/.*\//, '').replace(/\.gguf$/i, '').toLowerCase().replace(/[^a-z0-9_.-]/g, '-').slice(0, 70);
-  $('alias').value = name;
+  let name = f.replace(/.*[\/\\]/, '').replace(/\.gguf$/i, '').toLowerCase().replace(/[^a-z0-9_.-]/g, '-').slice(0, 70);
+  $('alias').value = name || 'local-qwen';
 }
 
 function getDeployPayload() {
@@ -738,8 +755,10 @@ async function startServer() {
     let d = await post('/start', payload);
     toast('Server started successfully (pid ' + d.pid + ')');
     refreshStatus();
+    loadLogs();
   } catch(e) {
     toast('Start Error: ' + e.message);
+    loadLogs();
   }
 }
 
@@ -948,15 +967,29 @@ async function pollDownloadsLoop() {
 
 async function loadLogs() {
   try {
-    let d = await api('/logs');
-    $('logContent').textContent = d.text;
+    let src = $('logSource') ? $('logSource').value : 'engine';
+    let d = await api('/logs?source=' + encodeURIComponent(src));
+    const el = $('logContent');
+    el.textContent = d.text;
+    el.scrollTop = el.scrollHeight;
+  } catch(e) {
+    toast(e.message);
+  }
+}
+
+async function clearLogs() {
+  try {
+    let src = $('logSource') ? $('logSource').value : 'engine';
+    await post('/logs/clear?source=' + encodeURIComponent(src), {});
+    await loadLogs();
+    toast('Logs cleared');
   } catch(e) {
     toast(e.message);
   }
 }
 
 async function init() {
-  await Promise.all([refreshStatus(), refreshAider(), loadModels(), loadDownloads()]);
+  await Promise.all([refreshStatus(), refreshAider(), loadModels(), loadDownloads(), loadLogs()]);
   pollDownloadsLoop();
   try {
     let s = await api('/settings');
@@ -983,7 +1016,7 @@ async function init() {
 }
 
 init();
-setInterval(() => { refreshStatus(); refreshAider(); }, 5000);
+setInterval(() => { refreshStatus(); refreshAider(); loadLogs(); }, 4000);
 </script>
 </body>
 </html>

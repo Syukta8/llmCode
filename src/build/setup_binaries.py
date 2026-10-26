@@ -461,18 +461,12 @@ def download_prebuilt_llama_cpp(accel: str) -> bool:
             tf.extractall(dest_dir)
     archive_path.unlink(missing_ok=True)
 
-    # Locate extracted llama-server and symlink/copy to bin/
+    # Locate extracted llama-server and set executable permissions (keep inside dest_dir with its DLLs/dylibs)
     exe_name = get_executable_name('llama-server')
     for p in dest_dir.rglob(exe_name):
         if p.is_file():
             if os.name != 'nt':
                 p.chmod(0o755)
-            top_bin = BIN_DIR / exe_name
-            if not top_bin.exists():
-                try:
-                    shutil.copy2(p, top_bin)
-                except Exception:
-                    pass
             break
 
     print(f"Prebuilt llama.cpp installed in {dest_dir}")

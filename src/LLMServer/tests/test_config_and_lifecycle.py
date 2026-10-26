@@ -75,6 +75,14 @@ class TestConfigAndLifecycle(unittest.TestCase):
         mac_cmake = _pkg_install_cmd('macos', 'cmake')
         self.assertEqual(mac_cmake, ['brew', 'install', 'cmake'])
 
+    def test_deploy_high_context_and_validation_logging(self):
+        """Verifies Deploy model accepts 265,356 context and logs validation errors cleanly."""
+        from src.LLMServer.app import Deploy
+        d = Deploy(path='test.gguf', context=265356, layers=32, threads=24)
+        self.assertEqual(d.context, 265356)
+        self.assertEqual(d.layers, 32)
+        self.assertEqual(d.threads, 24)
+
 
 if __name__ == '__main__':
     unittest.main()

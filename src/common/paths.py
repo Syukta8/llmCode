@@ -73,14 +73,20 @@ def _discover_llama_server() -> Path:
         SRC_DIR / 'llama.cpp' / 'build-metal' / 'bin' / exe,
         SRC_DIR / 'llama.cpp' / 'build' / 'bin' / exe,
         SRC_DIR / 'llama.cpp' / 'build' / 'bin' / 'Release' / exe,
-        BIN_DIR / exe,
         BIN_DIR / 'windows' / exe,
         BIN_DIR / 'macos' / exe,
         BIN_DIR / 'linux' / exe,
+        BIN_DIR / exe,
     ]
     for c in candidates:
         if c.is_file():
             return c.resolve()
+    for plat_sub in ('windows', 'macos', 'linux'):
+        sub_dir = BIN_DIR / plat_sub
+        if sub_dir.is_dir():
+            for p in sub_dir.rglob(exe):
+                if p.is_file():
+                    return p.resolve()
     return candidates[0]
 
 

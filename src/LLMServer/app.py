@@ -1,8 +1,9 @@
 import json, os, re, subprocess, threading, time, urllib.request, urllib.parse, urllib.error, shutil, signal, uuid
 from pathlib import Path
 from datetime import datetime
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 import sys
@@ -13,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 from src.common.paths import (
     CONFIG_DIR as STORE,
     CONFIG_FILE,
+    DAEMON_LOG_FILE,
     MODEL_DIR,
     LOG_FILE,
     get_llama_server_binary,
@@ -58,6 +60,27 @@ runtime_state = {'active': None, 'pid': None}
 app = FastAPI(title='llmCode', docs_url='/api/docs', openapi_url='/api/openapi.json')
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Logs validation errors to llama-server.log and returns a clean human-readable message."""
+    msgs = []
+    for err in exc.errors():
+        loc = '.'.join(str(x) for x in err.get('loc', []) if x != 'body')
+        msg = err.get('msg', 'invalid value')
+        inp = err.get('input', '')
+        msgs.append(f"{loc}: {msg} (got {inp!r})")
+    summary = '; '.join(msgs) or str(exc)
+    append_log(f"[VALIDATION ERROR] {request.url.path} -> {summary}")
+    return JSONResponse(status_code=422, content={'detail': summary, 'errors': exc.errors()})
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Logs HTTPExceptions to llama-server.log so UI Console Logs always record the failure reason."""
+    append_log(f"[HTTP {exc.status_code}] {request.url.path} -> {exc.detail}")
+    return JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
+
+
 def save_downloads():
     """Persist downloads state into config/config.json."""
     try:
@@ -80,21 +103,31 @@ def save_settings(data):
     save_config(cfg)
 
 
+def append_log(message: str):
+    """Writes a timestamped diagnostic event to LOG_FILE so UI console logs always show activity and errors."""
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {message}\n")
+    except Exception:
+        pass
+
+
 class Deploy(BaseModel):
     path: str
     backend: str = Field(default='llama.cpp', pattern=r'^(llama\.cpp|koboldcpp|ollama)$')
     alias: str = Field(default='local-qwen', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
-    layers: int = Field(default=8, ge=0, le=200)
-    context: int = Field(default=8192, ge=512, le=262144)
-    threads: int = Field(default=4, ge=1, le=128)
-    batch: int = Field(default=2048, ge=32, le=16384)
-    ubatch: int = Field(default=256, ge=32, le=4096)
+    layers: int = Field(default=8, ge=0, le=999)
+    context: int = Field(default=8192, ge=512, le=1048576)
+    threads: int = Field(default=4, ge=1, le=256)
+    batch: int = Field(default=2048, ge=32, le=65536)
+    ubatch: int = Field(default=256, ge=32, le=16384)
     reasoning: bool = False
     flash_attn: str = Field(default='on', pattern='^(on|off)$')
     kv_cache: str = Field(default='q8_0', pattern='^(f16|q8_0|q4_0)$')
     temp: float = Field(default=0.2, ge=0.0, le=2.0)
     top_p: float = Field(default=0.95, ge=0.0, le=1.0)
-    top_k: int = Field(default=40, ge=0, le=200)
+    top_k: int = Field(default=40, ge=0, le=500)
     min_p: float = Field(default=0.05, ge=0.0, le=1.0)
     repeat_penalty: float = Field(default=1.05, ge=0.0, le=3.0)
     main_gpu: int = Field(default=0, ge=0, le=16)
@@ -112,16 +145,16 @@ class OpenCodeLaunch(BaseModel):
     model_path: str = ''
     backend: str = Field(default='llama.cpp', pattern=r'^(llama\.cpp|koboldcpp|ollama)$')
     alias: str = Field(default='local-qwen', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
-    layers: int = Field(default=8, ge=0, le=200)
-    context: int = Field(default=8192, ge=512, le=262144)
-    threads: int = Field(default=4, ge=1, le=128)
-    batch: int = Field(default=2048, ge=32, le=16384)
-    ubatch: int = Field(default=256, ge=32, le=4096)
+    layers: int = Field(default=8, ge=0, le=999)
+    context: int = Field(default=8192, ge=512, le=1048576)
+    threads: int = Field(default=4, ge=1, le=256)
+    batch: int = Field(default=2048, ge=32, le=65536)
+    ubatch: int = Field(default=256, ge=32, le=16384)
     flash_attn: str = Field(default='on', pattern='^(on|off)$')
     kv_cache: str = Field(default='q8_0', pattern='^(f16|q8_0|q4_0)$')
     temp: float = Field(default=0.2, ge=0.0, le=2.0)
     top_p: float = Field(default=0.95, ge=0.0, le=1.0)
-    top_k: int = Field(default=40, ge=0, le=200)
+    top_k: int = Field(default=40, ge=0, le=500)
     min_p: float = Field(default=0.05, ge=0.0, le=1.0)
     repeat_penalty: float = Field(default=1.05, ge=0.0, le=3.0)
     main_gpu: int = Field(default=0, ge=0, le=16)
@@ -136,16 +169,16 @@ class AiderLaunch(BaseModel):
     model_path: str = ''
     backend: str = Field(default='llama.cpp', pattern=r'^(llama\.cpp|koboldcpp|ollama)$')
     alias: str = Field(default='local-qwen', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
-    layers: int = Field(default=8, ge=0, le=200)
-    context: int = Field(default=8192, ge=512, le=262144)
-    threads: int = Field(default=4, ge=1, le=128)
-    batch: int = Field(default=2048, ge=32, le=16384)
-    ubatch: int = Field(default=256, ge=32, le=4096)
+    layers: int = Field(default=8, ge=0, le=999)
+    context: int = Field(default=8192, ge=512, le=1048576)
+    threads: int = Field(default=4, ge=1, le=256)
+    batch: int = Field(default=2048, ge=32, le=65536)
+    ubatch: int = Field(default=256, ge=32, le=16384)
     flash_attn: str = Field(default='on', pattern='^(on|off)$')
     kv_cache: str = Field(default='q8_0', pattern='^(f16|q8_0|q4_0)$')
     temp: float = Field(default=0.2, ge=0.0, le=2.0)
     top_p: float = Field(default=0.95, ge=0.0, le=1.0)
-    top_k: int = Field(default=40, ge=0, le=200)
+    top_k: int = Field(default=40, ge=0, le=500)
     min_p: float = Field(default=0.05, ge=0.0, le=1.0)
     repeat_penalty: float = Field(default=1.05, ge=0.0, le=3.0)
     main_gpu: int = Field(default=0, ge=0, le=16)
@@ -292,7 +325,7 @@ def models():
                 found.append({
                     'path': str(p),
                     'name': p.name,
-                    'relative': str(p.relative_to(MODEL_DIR)),
+                    'relative': p.relative_to(MODEL_DIR).as_posix(),
                     'size_gb': round(st.st_size / 1e9, 2),
                     'size_bytes': st.st_size,
                     'modified': datetime.fromtimestamp(st.st_mtime).isoformat(timespec='minutes'),
@@ -384,15 +417,37 @@ def launch_backend_process(backend, path, params):
 
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     log_handle = open(LOG_FILE, 'a', buffering=1, encoding='utf-8')
-    log_handle.write(f'\n===== [{backend}] ' + datetime.now().isoformat() + ' =====\n')
+    cmd_str = ' '.join(f'"{a}"' if ' ' in a else a for a in args)
+    log_handle.write(f'\n===== [{backend}] {datetime.now().isoformat(timespec="seconds")} =====\n')
+    log_handle.write(f'[COMMAND] {cmd_str}\n')
+    log_handle.flush()
+
     env = os.environ.copy()
     if backend == 'ollama':
         env['OLLAMA_HOST'] = f'127.0.0.1:{PORT}'
 
-    proc = subprocess.Popen(
-        args, stdin=subprocess.DEVNULL, stdout=log_handle,
-        stderr=subprocess.STDOUT, start_new_session=True, cwd=str(STORE), env=env
-    )
+    # Ensure the binary's directory is in PATH so Windows finds companion CUDA DLLs (ggml-cuda.dll, cublas64_*.dll)
+    bin_parent = str(Path(args[0]).resolve().parent)
+    env['PATH'] = bin_parent + os.pathsep + env.get('PATH', '')
+
+    try:
+        proc = subprocess.Popen(
+            args, stdin=subprocess.DEVNULL, stdout=log_handle,
+            stderr=subprocess.STDOUT, start_new_session=True, cwd=bin_parent, env=env
+        )
+    except Exception as e:
+        append_log(f"[ERROR] Failed to spawn {backend}: {e}")
+        raise HTTPException(500, f"Failed to spawn {backend}: {e}")
+
+    # Wait briefly to catch immediate startup crashes (e.g. missing CUDA DLLs, invalid flags, OOM)
+    time.sleep(0.35)
+    if proc.poll() is not None:
+        exit_code = proc.returncode
+        append_log(f"[ERROR] {backend} exited immediately with code {exit_code} (0x{exit_code & 0xFFFFFFFF:08X})")
+        raise HTTPException(
+            500,
+            f"{backend} exited immediately (code {exit_code}). Check Server Console Logs for details."
+        )
     runtime_state['active'] = {
         'backend': backend,
         'name': path.name,
@@ -464,14 +519,24 @@ def stop():
 
 
 @app.get('/api/logs')
-def logs():
-    if not LOG_FILE.exists():
-        return {'text': 'No server log yet.'}
-    with open(LOG_FILE, 'rb') as f:
+def logs(source: str = 'engine'):
+    target_file = DAEMON_LOG_FILE if source == 'daemon' else LOG_FILE
+    if not target_file.exists():
+        return {'text': f'No {source} log yet ({target_file.name}).', 'file': str(target_file)}
+    with open(target_file, 'rb') as f:
         f.seek(0, 2)
-        f.seek(max(0, f.tell() - 24000))
+        f.seek(max(0, f.tell() - 32000))
         data = f.read()
-    return {'text': data.decode('utf-8', 'replace')[-22000:]}
+    return {'text': data.decode('utf-8', 'replace')[-30000:], 'file': str(target_file)}
+
+
+@app.post('/api/logs/clear')
+def clear_logs(source: str = 'engine'):
+    target_file = DAEMON_LOG_FILE if source == 'daemon' else LOG_FILE
+    if target_file.exists():
+        target_file.write_text('', encoding='utf-8')
+    append_log(f"[INFO] Log cleared ({target_file.name})")
+    return {'ok': True}
 
 
 @app.get('/api/hf/search')
