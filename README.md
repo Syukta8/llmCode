@@ -10,6 +10,10 @@ Seamlessly connect local open-weight models (`llama.cpp`, `KoboldCpp`, `Ollama`)
 ### 1. Requirements
 - **Linux**: Ubuntu 22.04/24.04, Python 3.10+, NVIDIA Driver + CUDA.
 - **Windows**: Windows 10/11, Python 3.10+, NVIDIA Driver.
+  - To compile locally against your exact GPU on Windows:
+    - Install **CMake** (`winget install Kitware.CMake`)
+    - Install **Ninja** (`winget install Ninja-build.Ninja`)
+    - Install **Visual Studio C++ Build Tools** (`winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`)
 
 ### 2. Setup Environment & Binaries
 Standardized cross-platform installer:
@@ -28,7 +32,42 @@ setup.bat run
 # Or direct Python CLI:
 python llmcode.py setup
 ```
-*(On Windows, this automatically resolves or downloads pre-built CUDA `llama-server.exe` binaries into `bin/windows/`)*.
+
+---
+
+## 🖥️ Windows Remote Setup & GPU Compilation Guide
+
+If setting up on a clean Windows machine (e.g. RTX 5090 / 4090 workstation), follow these steps in PowerShell (Run as Administrator):
+
+### Step 1: Install Build Tools & Git via Winget
+```powershell
+# 1. Install Git, CMake, Ninja, and Python (if not present)
+winget install --id Git.Git -e --source winget
+winget install --id Kitware.CMake -e --source winget
+winget install --id Ninja-build.Ninja -e --source winget
+
+# 2. Install Visual Studio 2022 C++ Compiler (cl.exe and Windows SDK)
+winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive"
+```
+
+### Step 2: Open "x64 Native Tools Command Prompt for VS 2022"
+Ensure `cl.exe`, `nvcc.exe`, and `cmake.exe` are in the environment PATH.
+
+### Step 3: Compile llama.cpp for your GPU Architecture
+```cmd
+cd C:\Users\PC\llmCode
+if not exist src\llama.cpp git clone https://github.com/ggml-org/llama.cpp.git src\llama.cpp
+cmake -S src\llama.cpp -B src\llama.cpp\build-cuda -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON
+cmake --build src\llama.cpp\build-cuda --target llama-server -j 8
+```
+*(Copy or symlink `llama-server.exe` to `bin\windows\llama-server.exe` or let `llmcode.py` auto-detect `src\llama.cpp\build-cuda\bin\llama-server.exe`)*.
+
+### Step 4: Run llmCode Setup & Start Dashboard
+```cmd
+cd C:\Users\PC\llmCode
+setup.bat run
+```
+Access dashboard at `http://127.0.0.1:7860`.
 
 ---
 

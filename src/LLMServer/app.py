@@ -125,6 +125,8 @@ class OpenCodeLaunch(BaseModel):
     main_gpu: int = Field(default=0, ge=0, le=16)
     split_mode: str = Field(default='layer', pattern='^(none|layer|row)$')
     custom_flags: str = ''
+    restore_history: bool = False
+    session_id: str = ''
 
 class AiderLaunch(BaseModel):
     project_dir: str
@@ -147,6 +149,8 @@ class AiderLaunch(BaseModel):
     split_mode: str = Field(default='layer', pattern='^(none|layer|row)$')
     custom_flags: str = ''
     edit_format: str = Field(default='diff', pattern=r'^(diff|whole|udiff|architect)$')
+    restore_history: bool = False
+    history_file: str = ''
 
 
 def safe_model_path(path):
@@ -253,12 +257,17 @@ def launch_backend_process(backend, path, params):
             '--gpulayers', str(params.layers),
             '--threads', str(params.threads),
             '--blasbatchsize', str(params.batch),
-            '--smartcontext', '--skiplauncher', '--quiet'
+            '--usemmap',
+            '--skiplauncher', '--quiet'
         ]
         if params.layers > 0:
             args.append('--usecuda')
         if params.flash_attn == 'on':
             args.append('--flashattention')
+        if params.kv_cache == 'q8_0':
+            args.extend(['--quantkv', '1'])
+        elif params.kv_cache == 'q4_0':
+            args.extend(['--quantkv', '2'])
         args.extend(custom_args)
 
     elif backend == 'ollama':
@@ -554,7 +563,13 @@ def launch_opencode(params: OpenCodeLaunch):
 
     opencode_home_bin = Path.home() / '.opencode' / 'bin' / 'opencode'
     oc_bin = str(opencode_home_bin) if opencode_home_bin.is_file() else (shutil.which('opencode') or shutil.which('opencode2') or 'npx opencode-ai')
-    oc_cmd = f'{oc_bin} --standalone'
+    oc_cmd = f'{oc_bin}'
+    if params.restore_history:
+        if params.session_id.strip():
+            oc_cmd += f' --session {params.session_id.strip()}'
+        else:
+            oc_cmd += ' --continue'
+    oc_cmd += ' --standalone'
     opencode_proc = spawn_in_terminal(oc_cmd, cwd=project, title="OpenCode CLI")
     return {
         'ok': True,
@@ -635,6 +650,10 @@ def launch_aider(params: AiderLaunch):
     model_arg = f'openai/{params.alias}'
     edit_arg = f'--edit-format {params.edit_format}'
     aider_cmd = f'{aider_bin} --openai-api-base http://127.0.0.1:{PORT}/v1 --openai-api-key none --model {model_arg} {edit_arg} --stream --dark-mode'
+    if params.restore_history:
+        aider_cmd += ' --restore-chat-history'
+    if params.history_file.strip():
+        aider_cmd += f' --chat-history-file {params.history_file.strip()}'
 
     aider_proc = spawn_in_terminal(aider_cmd, cwd=project, title="Aider CLI")
     return {
