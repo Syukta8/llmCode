@@ -5,18 +5,28 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+import sys
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.common.paths import (
+    STORE_DIR as STORE,
+    MODEL_DIR,
+    LOG_FILE,
+    SETTINGS_FILE,
+    DOWNLOADS_FILE,
+    get_llama_server_binary,
+    get_koboldcpp_binary,
+    get_ollama_binary,
+)
+from src.common.process import detect_terminal, spawn_in_terminal, kill_process_tree
+
 HOME = Path.home()
 ROOT = Path(__file__).resolve().parent
-STORE = HOME / '.local' / 'share' / 'llmCode'
-STORE.mkdir(parents=True, exist_ok=True)
-MODEL_DIR = Path(os.environ.get('LLM_MODEL_DIR', str(HOME/'llmCode'/'models'))).expanduser().resolve()
-SERVER_BIN = Path(os.environ.get('LLAMA_SERVER_BIN', str(HOME/'llmCode'/'src'/'llama.cpp'/'build-cuda'/'bin'/'llama-server'))).expanduser().resolve()
-KOBOLD_BIN = Path(HOME/'llmCode'/'src'/'koboldcpp'/'koboldcpp.py').expanduser().resolve()
-OLLAMA_BIN = Path(HOME/'llmCode'/'bin'/'ollama').expanduser().resolve()
-STATE_FILE = STORE/'state.json'
-LOG_FILE = STORE/'llama-server.log'
-SETTINGS_FILE = STORE/'settings.json'
-DOWNLOADS_FILE = STORE/'downloads.json'
+SERVER_BIN = get_llama_server_binary()
+KOBOLD_BIN = get_koboldcpp_binary()
+OLLAMA_BIN = get_ollama_binary()
 PORT = int(os.environ.get('LLAMA_PORT','8080'))
 lock = threading.RLock()
 proc = None
@@ -70,12 +80,8 @@ def save_settings(data):
     SETTINGS_FILE.write_text(json.dumps(current, indent=2) + '\n')
 
 
-def detect_terminal():
-    """Auto-detect available terminal emulator."""
-    for term in ['gnome-terminal', 'xfce4-terminal', 'x-terminal-emulator', 'xterm']:
-        if shutil.which(term):
-            return term
-    return None
+# detect_terminal imported from src.common.process
+
 
 class Deploy(BaseModel):
     path: str
@@ -260,11 +266,10 @@ def stop():
     global proc
     with lock:
         if not alive(): return {'ok':True,'message':'No dashboard-managed server running'}
-        pid=proc.pid
-        proc.terminate()
-        try: proc.wait(timeout=8)
-        except subprocess.TimeoutExpired:
-            proc.kill();proc.wait(timeout=5)
+        pid = proc.pid
+        kill_process_tree(pid)
+        try: proc.wait(timeout=3)
+        except Exception: pass
         return {'ok':True,'message':f'Stopped dashboard-managed process {pid}'}
 
 @app.get('/api/logs')
@@ -443,18 +448,7 @@ def launch_opencode(params: OpenCodeLaunch):
         oc_bin = shutil.which('opencode') or shutil.which('opencode2') or 'npx opencode-ai'
     oc_cmd = f'{oc_bin} --standalone'
 
-    if terminal == 'gnome-terminal':
-        term_args = ['gnome-terminal', '--', 'bash', '-c', f'cd {project} && echo "Waiting for llama-server..." && until curl -sf http://127.0.0.1:{PORT}/health > /dev/null 2>&1; do sleep 1; done && {oc_cmd}; exec bash']
-    elif terminal == 'xfce4-terminal':
-        term_args = ['xfce4-terminal', '-e', f'bash -c "cd {project} && echo \\"Waiting for llama-server...\\" && until curl -sf http://127.0.0.1:{PORT}/health > /dev/null 2>&1; do sleep 1; done && {oc_cmd}; exec bash"']
-    elif terminal == 'x-terminal-emulator':
-        term_args = ['x-terminal-emulator', '-e', f'bash -c "cd {project} && echo \\"Waiting for llama-server...\\" && until curl -sf http://127.0.0.1:{PORT}/health > /dev/null 2>&1; do sleep 1; done && {oc_cmd}; exec bash"']
-    else:
-        term_args = ['xterm', '-e', f'bash -c "cd {project} && echo \\"Waiting for llama-server...\\" && until curl -sf http://127.0.0.1:{PORT}/health > /dev/null 2>&1; do sleep 1; done && {oc_cmd}; exec bash"']
-
-    opencode_proc = subprocess.Popen(term_args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL, start_new_session=True)
-
+    opencode_proc = spawn_in_terminal(oc_cmd, cwd=project, title="OpenCode CLI")
     return {
         'ok': True,
         'message': 'OpenCode CLI launching in terminal. It will wait for llama-server to be ready.',
@@ -553,17 +547,7 @@ def launch_aider(params: AiderLaunch):
     edit_arg = f'--edit-format {params.edit_format}'
     aider_cmd = f'{aider_bin} --openai-api-base http://127.0.0.1:{PORT}/v1 --openai-api-key none --model {model_arg} {edit_arg} --stream --dark-mode'
 
-    if terminal == 'gnome-terminal':
-        term_args = ['gnome-terminal', '--', 'bash', '-c', f'cd {project} && echo "Waiting for llama-server..." && until curl -sf http://127.0.0.1:{PORT}/health > /dev/null 2>&1; do sleep 1; done && {aider_cmd}; exec bash']
-    elif terminal == 'xfce4-terminal':
-        term_args = ['xfce4-terminal', '-e', f'bash -c "cd {project} && echo \\"Waiting for llama-server...\\" && until curl -sf http://127.0.0.1:{PORT}/health > /dev/null 2>&1; do sleep 1; done && {aider_cmd}; exec bash"']
-    elif terminal == 'x-terminal-emulator':
-        term_args = ['x-terminal-emulator', '-e', f'bash -c "cd {project} && echo \\"Waiting for llama-server...\\" && until curl -sf http://127.0.0.1:{PORT}/health > /dev/null 2>&1; do sleep 1; done && {aider_cmd}; exec bash"']
-    else:
-        term_args = ['xterm', '-e', f'bash -c "cd {project} && echo \\"Waiting for llama-server...\\" && until curl -sf http://127.0.0.1:{PORT}/health > /dev/null 2>&1; do sleep 1; done && {aider_cmd}; exec bash"']
-
-    aider_proc = subprocess.Popen(term_args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL, start_new_session=True)
+    aider_proc = spawn_in_terminal(aider_cmd, cwd=project, title="Aider CLI")
 
     return {
         'ok': True,
