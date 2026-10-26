@@ -6,11 +6,20 @@ __pycache__/
 env/
 venv/
 
-# Builds, binaries, submodules
+# Engine Source & Prebuilt Distributions
 src/llama.cpp/
 src/koboldcpp/
+src/ollama/
 bin/ollama_dist/
 bin/ollama
+bin/windows/
+bin/macos/
+bin/linux/
+
+# Config Runtime PID & Temp Files
+config/*.pid
+config/*.tmp
+config/Modelfile
 
 # Logs & Runtime State
 logs/

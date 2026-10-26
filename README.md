@@ -1,148 +1,73 @@
-# llmCode (Cross-Platform Local LLM Server & Control Center)
+# llmCode
 
-A unified local AI coding framework supporting **Linux (Ubuntu/Debian)** and **Windows (10/11)**.
-Seamlessly connect local open-weight models (`llama.cpp`, `KoboldCpp`, `Ollama`) with **VS Code Continue**, **Aider**, and **OpenCode CLI**.
+Unified local LLM server and coding station supporting **Windows**, **Linux**, and **macOS**.
+Manage `llama.cpp`, `KoboldCpp`, and `Ollama` backends and launch **Aider** or **OpenCode** CLI from a single web dashboard (`llm-dash`).
 
 ---
 
-## 🚀 Quickstart
+## 1. Windows Setup & Usage
 
-### 1. Requirements
-- **Linux**: Ubuntu 22.04/24.04, Python 3.10+, NVIDIA Driver + CUDA.
-- **Windows**: Windows 10/11, Python 3.10+, NVIDIA Driver.
-  - To compile locally against your exact GPU on Windows:
-    - Install **CMake** (`winget install Kitware.CMake`)
-    - Install **Ninja** (`winget install Ninja-build.Ninja`)
-    - Install **Visual Studio C++ Build Tools** (`winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`)
-
-### 2. Setup Environment & Binaries
-Standardized cross-platform installer:
-
-```bash
-# Linux:
-./setup.sh
-# or launch dashboard directly:
-./setup.sh run
-
-# Windows:
+```cmd
+:: 1. Install environment, compile/download backends & CLI agents
 setup.bat
-# or launch dashboard directly:
-setup.bat run
 
-# Or direct Python CLI:
-python llmcode.py setup
+:: 2. Launch llm-dash in background and open browser (http://127.0.0.1:7860)
+launch.bat
+
+:: 3. Stop llm-dash and active inference backends
+stop.bat
 ```
 
 ---
 
-## 🖥️ Windows Source Compilation Guide
-
-To compile backend binaries directly from source on Windows:
-
-### Step 1: Install Build Tools via Winget
-```powershell
-# In PowerShell (Run as Administrator):
-winget install --id Kitware.CMake -e --source winget
-winget install --id Ninja-build.Ninja -e --source winget
-winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive"
-```
-
-### Step 2: Open "x64 Native Tools Command Prompt for VS 2022"
-Ensure `cl.exe`, `nvcc.exe`, and `cmake.exe` are in the environment PATH.
-
-### Step 3: Build llama.cpp with CUDA Acceleration
-```cmd
-if not exist src\llama.cpp git clone https://github.com/ggml-org/llama.cpp.git src\llama.cpp
-cmake -S src\llama.cpp -B src\llama.cpp\build-cuda -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON
-cmake --build src\llama.cpp\build-cuda --target llama-server -j 8
-```
-*(The binary `llama-server.exe` will be automatically detected by `llmcode.py` and `setup.bat`)*.
-
-### Step 4: Run Setup & Start Dashboard
-```cmd
-setup.bat run
-```
-Access dashboard at `http://127.0.0.1:7860`.
-
----
-
-## 📦 Usage
-
-### Launch Web Dashboard (Port 7860)
-Manage models, launch backends (`llama.cpp`, `KoboldCpp`, `Ollama`), and trigger Aider/OpenCode directly from the browser:
+## 2. Linux Setup & Usage
 
 ```bash
-python llmcode.py dash
+# 1. Install environment, compile/download backends & CLI agents
+./setup.sh
+
+# 2. Launch llm-dash in background and open browser (http://127.0.0.1:7860)
+./launch.sh
+
+# 3. Stop llm-dash and active inference backends
+./stop.sh
 ```
-Open browser at `http://127.0.0.1:7860`.
 
 ---
 
-### Serve a Model via CLI (Port 8080)
+## 3. macOS Setup & Usage
+
 ```bash
-# Serve Qwen 2.5 Coder 7B with 8 GPU layers offloaded:
-python llmcode.py serve 7b --layers 8 --context 8192
+# 1. Install environment, compile/download backends (Apple Metal) & CLI agents
+./setup.sh
 
-# Or serve 14B model:
-python llmcode.py serve 14b --layers 10 --context 16384
+# 2. Launch llm-dash in background and open browser (http://127.0.0.1:7860)
+./launch.sh
+
+# 3. Stop llm-dash and active inference backends
+./stop.sh
 ```
 
 ---
 
-### Download Models
-```bash
-# Download curated presets (4b, 7b, 14b):
-python llmcode.py download 7b
+## Folder Structure
 
-# Or custom Hugging Face GGUF:
-python llmcode.py download custom --repo "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF" --filename "qwen2.5-coder-7b-instruct-q4_k_m.gguf"
-```
-
----
-
-### Connect with VS Code Continue
-In `~/.continue/config.yaml`:
-
-```yaml
-models:
-  - name: Local Qwen 2.5 Coder
-    provider: openai
-    model: qwen2.5-coder-7b-instruct-q4_k_m
-    apiBase: http://127.0.0.1:8080/v1
-    apiKey: EMPTY
-    roles:
-      - chat
-      - edit
-      - apply
-    capabilities:
-      - tool_use
-    defaultCompletionOptions:
-      contextLength: 32768
-```
-
----
-
-### Launch Aider in Interactive Terminal
-```bash
-python llmcode.py aider --dir /path/to/project
-```
-
----
-
-## 🛠️ Architecture
-
-```
+```text
 llmCode/
-├── llmcode.py               # Unified cross-platform CLI runner
+├── setup.bat / setup.sh     # Interactive installer (prerequisites, engines, CLI agents)
+├── launch.bat / launch.sh   # Auto-syncs config/config.json and starts llm-dash daemon
+├── stop.bat / stop.sh       # Stops llm-dash and all active backend servers
+├── llmcode.py               # Cross-platform CLI runner
+├── config/
+│   └── config.json          # Auto-healed database (paths, binaries, settings, downloads)
 ├── src/
-│   ├── common/              # Cross-platform abstractions
-│   │   ├── paths.py         # Path resolution (Linux XDG vs Windows LocalAppData)
-│   │   └── process.py       # Cross-platform terminal & process trees
-│   ├── build/               # Binary setup & Windows CUDA prebuilt downloader
-│   │   └── setup_binaries.py
-│   └── LLMServer/           # Web Dashboard (FastAPI + uvicorn)
-│       ├── app.py
-│       └── static/index.html
-├── bin/                     # Platform binaries (Windows/Linux)
-└── models/                  # Local GGUF models
+│   ├── llama.cpp/           # llama.cpp source & build
+│   ├── koboldcpp/           # KoboldCpp source & build
+│   ├── ollama/              # Ollama source & build
+│   ├── build/               # Prerequisite checker & engine compiler/downloader
+│   ├── common/              # Cross-platform path & process management
+│   └── LLMServer/           # FastAPI Web Dashboard (llm-dash)
+├── bin/                     # Prebuilt binaries & desktop assets
+├── models/                  # Local GGUF models
+└── logs/                    # Daemon & inference engine logs
 ```
