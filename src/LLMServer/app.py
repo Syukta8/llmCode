@@ -979,7 +979,7 @@ def launch_aider(params: AiderLaunch):
 
     model_arg = f'openai/{params.alias}'
     edit_arg = f'--edit-format {params.edit_format}'
-    aider_cmd = f'"{aider_bin}" --openai-api-base http://127.0.0.1:{PORT}/v1 --openai-api-key none --model {model_arg} {edit_arg} --stream --dark-mode --auto-accept-architect --reasoning-effort high'
+    aider_cmd = f'"{aider_bin}" --openai-api-base http://127.0.0.1:{PORT}/v1 --openai-api-key none --model {model_arg} {edit_arg} --stream --dark-mode --auto-accept-architect --yes-always --auto-commits --reasoning-effort high'
     if params.rag_enabled:
         index_workspace(project)
         aider_cmd += f' --read "{RAG_CONTEXT_FILE}"'
