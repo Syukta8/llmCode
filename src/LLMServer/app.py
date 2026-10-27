@@ -436,8 +436,8 @@ def launch_backend_process(backend, path, params):
             args.extend(['--quantkv', '1'])
         elif params.kv_cache == 'q4_0':
             args.extend(['--quantkv', '2'])
-        if rag_on:
-            args.append('--embeddings')
+        # KoboldCpp does not have a standalone --embeddings flag (only --embeddingsmodel).
+        # We omit it to prevent CLI parameter errors.
         args.extend(ext_flags)
         args.extend(custom_args)
 
@@ -456,6 +456,15 @@ def launch_backend_process(backend, path, params):
             f"PARAMETER repeat_penalty {params.repeat_penalty}",
         ]
         modelfile_path.write_text("\n".join(modelfile_content) + "\n", encoding='utf-8')
+
+        # Register/create model in Ollama library so Continue and OpenAI endpoints recognise it
+        ollama_model_name = getattr(params, 'alias', 'ollama') or 'ollama'
+        try:
+            create_cmd = [str(ollama_bin), 'create', ollama_model_name, '-f', str(modelfile_path)]
+            subprocess.run(create_cmd, check=True, capture_output=True, timeout=120)
+        except Exception as e:
+            append_log(f"[WARN] Failed to pre-register model in Ollama: {e}")
+
         args = [str(ollama_bin), 'serve']
         args.extend(custom_args)
 
