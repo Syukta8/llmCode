@@ -484,6 +484,8 @@ def launch_backend_process(backend, path, params):
             args += ['-ctk', params.kv_cache, '-ctv', params.kv_cache]
         if hasattr(params, 'reasoning') and not params.reasoning:
             args += ['--reasoning', 'off']
+        else:
+            args += ['--reasoning', 'on', '--reasoning-effort', 'high']
         if rag_on:
             args += ['--embeddings', '--pooling', 'mean']
         args.extend(ext_flags)
@@ -780,7 +782,8 @@ def opencode_status():
 def write_opencode_config(project_dir: Path, alias: str, port: int, rag_context_file: Optional[Path] = None) -> Path:
     """
     Writes or updates opencode.json in the target project directory so OpenCode CLI
-    connects directly to the local backend API using the standard alias (llamacpp, koboldcpp, ollama).
+    connects directly to the local backend API using the standard alias,
+    enables build agent, full edit/bash tools, and sets reasoning effort to high.
     """
     cfg_path = project_dir / 'opencode.json'
     data = {}
@@ -801,10 +804,26 @@ def write_opencode_config(project_dir: Path, alias: str, port: int, rag_context_
         'models': {
             alias: {
                 'name': alias,
+                'reasoning': True,
+                'reasoning_options': [
+                    {'type': 'effort', 'values': ['high']}
+                ]
             }
         }
     }
     data['model'] = f'llmcode/{alias}'
+    data['default_agent'] = 'build'
+    data['permission'] = {
+        'read': 'allow',
+        'edit': 'allow',
+        'glob': 'allow',
+        'grep': 'allow',
+        'list': 'allow',
+        'bash': 'allow',
+        'task': 'allow',
+        'todowrite': 'allow',
+        'question': 'allow'
+    }
     if rag_context_file and rag_context_file.is_file():
         data['instructions'] = [str(rag_context_file.resolve())]
     cfg_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
@@ -870,7 +889,7 @@ def launch_opencode(params: OpenCodeLaunch):
 
     cfg = sync_config()
     oc_bin = cfg.get('agents', {}).get('opencode') or 'npx opencode-ai'
-    oc_cmd = f'"{oc_bin}"' if ' ' in str(oc_bin) and not str(oc_bin).startswith('npx ') else f'{oc_bin}'
+    oc_cmd = (f'"{oc_bin}"' if ' ' in str(oc_bin) and not str(oc_bin).startswith('npx ') else f'{oc_bin}') + ' --auto'
     if params.restore_history:
         if params.session_id.strip():
             oc_cmd += f' --session {params.session_id.strip()}'
