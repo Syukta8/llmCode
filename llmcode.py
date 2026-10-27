@@ -170,7 +170,7 @@ def cmd_serve(args):
         str(llama_bin),
         '--model', str(model_file),
         '--alias', args.alias or 'llamacpp',
-        '--host', '127.0.0.1',
+        '--host', getattr(args, 'host', '0.0.0.0'),
         '--port', str(args.port),
         '--ctx-size', str(args.context),
         '--n-gpu-layers', str(args.layers),
@@ -202,7 +202,8 @@ def cmd_dash(args):
     """Launch the Web Dashboard (FastAPI server on port 7860) in foreground or background daemon mode."""
     cfg = sync_config()
     port = args.port or cfg.get('settings', {}).get('dash_port', 7860)
-    url = f"http://127.0.0.1:{port}"
+    host = getattr(args, "host", "0.0.0.0")
+    url = f"http://{'127.0.0.1' if host == '0.0.0.0' else host}:{port}"
 
     # Check if already running
     if PID_FILE.is_file():
@@ -226,7 +227,7 @@ def cmd_dash(args):
     cmd = [
         py_exe, '-m', 'uvicorn', 'app:app',
         '--app-dir', str(server_dir),
-        '--host', '127.0.0.1',
+        '--host', getattr(args, 'host', '0.0.0.0'),
         '--port', str(port),
     ]
 
@@ -327,6 +328,7 @@ def main():
     p_serve.add_argument("--flash-attn", default="on", choices=["on", "off"], help="Flash attention")
     p_serve.add_argument("--kv-cache", default="q8_0", choices=["f16", "q8_0", "q4_0"], help="KV cache quantization")
     p_serve.add_argument("--port", type=int, default=8080, help="Port to listen on")
+    p_serve.add_argument("--host", default="0.0.0.0", help="Host address to bind to")
     p_serve.add_argument("--alias", default="", help="Model alias")
     p_serve.add_argument("--custom-flags", default="", help="Additional raw flags to pass")
     p_serve.set_defaults(func=cmd_serve)
@@ -334,6 +336,7 @@ def main():
     # dash
     p_dash = subparsers.add_parser("dash", help="Start Web Dashboard (llm-dash)")
     p_dash.add_argument("--port", type=int, default=7860, help="Dashboard port")
+    p_dash.add_argument("--host", default="0.0.0.0", help="Host address to bind to")
     p_dash.add_argument("--daemon", action="store_true", help="Run dashboard as background daemon")
     p_dash.add_argument("--no-browser", action="store_true", help="Do not auto-open browser")
     p_dash.set_defaults(func=cmd_dash)
