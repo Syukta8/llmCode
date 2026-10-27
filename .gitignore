@@ -16,12 +16,8 @@ bin/windows/
 bin/macos/
 bin/linux/
 
-# Config Runtime PID & Temp Files
-config/*.pid
-config/*.tmp
-config/Modelfile
-config/rag_index.json
-config/rag_context.md
+# Device-Specific Config Directory
+config/
 
 # Logs & Runtime State
 logs/
