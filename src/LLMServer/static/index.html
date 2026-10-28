@@ -344,6 +344,16 @@
       </div>
     </div>
     <div class="telemetry-card">
+      <span class="status-dot online"></span>
+      <div class="telemetry-meta" style="flex:1;">
+        <span class="telemetry-label">Security / API Key</span>
+        <div style="display:flex; align-items:center; gap:6px;">
+          <span class="telemetry-val" id="apiKeyDisplay" style="font-family:var(--mono-font); font-size:11px;">sk-••••••••</span>
+          <button class="subtle" onclick="copyApiKey()" style="padding:2px 8px; font-size:10px;">Copy</button>
+        </div>
+      </div>
+    </div>
+    <div class="telemetry-card">
       <span class="status-dot" id="aiderDot"></span>
       <div class="telemetry-meta">
         <span class="telemetry-label">Coding Assistant (Aider)</span>
@@ -609,6 +619,16 @@ let dirBrowserOpen = false;
 let downloadsPollTimer = null;
 const $ = id => document.getElementById(id);
 
+
+function copyApiKey() {
+  if (window.currentApiKey) {
+    navigator.clipboard.writeText(window.currentApiKey);
+    toast('API Key copied to clipboard!');
+  } else {
+    toast('API Key not loaded yet');
+  }
+}
+
 function toast(msg) {
   const el = $('msg');
   el.textContent = msg;
@@ -682,6 +702,11 @@ async function refreshStatus() {
     }
 
     $('connection').textContent = s.binary_exists ? 'Backend Engine Ready' : 'Binary Not Installed';
+    if (s.api_key) {
+      window.currentApiKey = s.api_key;
+      let el = $('apiKeyDisplay');
+      if (el) el.textContent = s.api_key.substring(0, 7) + '...' + s.api_key.substring(s.api_key.length - 4);
+    }
   } catch(e) {
     $('connection').textContent = 'Connecting...';
   }

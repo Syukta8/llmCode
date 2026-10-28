@@ -1,4 +1,4 @@
-import json, os, re, subprocess, threading, time, urllib.request, urllib.parse, urllib.error, shutil, signal, uuid
+import json, os, re, secrets, subprocess, threading, time, urllib.request, urllib.parse, urllib.error, shutil, signal, uuid
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -105,6 +105,16 @@ def save_downloads():
 def load_settings():
     """Load persisted settings from config/config.json."""
     return load_config().get('settings', {})
+
+def get_or_create_api_key() -> str:
+    """Retrieves or auto-generates a secure random API key persisted in config/config.json."""
+    settings = load_settings()
+    key = settings.get('api_key') or os.environ.get('LLM_API_KEY')
+    if not key:
+        key = f"sk-{secrets.token_urlsafe(24)}"
+        save_settings({'api_key': key})
+    return key
+
 
 
 def save_settings(data):
@@ -234,12 +244,15 @@ def http_json(url, timeout=8):
 
 
 def server_health():
+    headers = {'Authorization': f'Bearer {get_or_create_api_key()}'}
     try:
-        return http_json(f'http://127.0.0.1:{PORT}/health', 2)
+        with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{PORT}/health', headers=headers), timeout=2) as r:
+            return json.loads(r.read(3_000_000))
     except Exception:
         pass
     try:
-        return http_json(f'http://127.0.0.1:{PORT}/v1/models', 2)
+        with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{PORT}/v1/models', headers=headers), timeout=2) as r:
+            return json.loads(r.read(3_000_000))
     except Exception:
         return None
 
@@ -320,6 +333,7 @@ def system_status():
         'model_dir_exists': MODEL_DIR.is_dir(),
         'config_file': str(CONFIG_FILE),
         'server_port': PORT,
+        'api_key': get_or_create_api_key(),
         'platform': sys.platform,
     }
 
@@ -426,7 +440,7 @@ def launch_backend_process(backend, path, params):
             '--threads', str(params.threads),
             '--blasbatchsize', str(params.batch),
             '--usemmap',
-            '--skiplauncher', '--quiet',
+            '--skiplauncher', '--quiet', '--host', '0.0.0.0',
         ]
         if params.layers > 0 and sys.platform != 'darwin':
             args.append('--usecuda')
@@ -473,7 +487,8 @@ def launch_backend_process(backend, path, params):
             raise HTTPException(400, f'llama-server not found at {server_bin}')
         args = [
             str(server_bin), '--model', str(path), '--alias', params.alias,
-            '--host', '127.0.0.1', '--port', str(PORT),
+            '--host', '0.0.0.0', '--port', str(PORT),
+            '--api-key', get_or_create_api_key(),
             '--ctx-size', str(params.context),
             '--n-gpu-layers', str(params.layers),
             '--threads', str(params.threads),
@@ -509,7 +524,7 @@ def launch_backend_process(backend, path, params):
 
     env = os.environ.copy()
     if backend == 'ollama':
-        env['OLLAMA_HOST'] = f'127.0.0.1:{PORT}'
+        env['OLLAMA_HOST'] = f'0.0.0.0:{PORT}'
 
     # Ensure the binary's directory is in PATH so Windows finds companion CUDA DLLs (ggml-cuda.dll, cublas64_*.dll)
     bin_parent = str(Path(args[0]).resolve().parent)
