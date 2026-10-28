@@ -842,11 +842,20 @@ def download_prebuilt_ollama() -> bool:
 # ==============================================================================
 # CLI Agents: Aider & OpenCode (Installed directly inside llm-dash .venv)
 # ==============================================================================
+def is_binary_runnable(bin_path: Path) -> bool:
+    """Verifies that an executable binary can run and executes without missing dynamic linkers."""
+    try:
+        res = subprocess.run([str(bin_path), '--version'], capture_output=True, timeout=5)
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
 def _install_opencode_into_venv(venv_dir: Path) -> bool:
     """
     Installs OpenCode CLI directly inside the llm-dash virtualenv
     (`.venv/bin/opencode` on Linux/macOS or `.venv/Scripts/opencode.exe` on Windows).
-    Tries GitHub release binary first, then local npm --prefix .venv fallback.
+    Prioritizes local npm installation scoped to .venv, falling back to GitHub release binary.
     """
     plat = get_platform_name()
     venv_bin_dir = venv_dir / ('Scripts' if os.name == 'nt' else 'bin')
@@ -854,12 +863,45 @@ def _install_opencode_into_venv(venv_dir: Path) -> bool:
     exe_name = get_executable_name('opencode')
     target_bin = venv_bin_dir / exe_name
 
-    if target_bin.is_file():
-        print(f"OpenCode CLI already present in venv at {target_bin}")
-        return True
+    if target_bin.is_file() or target_bin.is_symlink():
+        if is_binary_runnable(target_bin):
+            print(f"OpenCode CLI already present and runnable in venv at {target_bin}")
+            return True
+        print(f"Existing OpenCode binary at {target_bin} failed execution test; reinstalling...")
+        target_bin.unlink(missing_ok=True)
 
-    # 1. Try downloading official standalone binary release from GitHub into .venv/bin or .venv/Scripts
-    api_url = "https://api.github.com/repos/sst/opencode/releases/latest"
+    # 1. Primary: install via npm scoped to venv_dir (`npm install --prefix <venv_dir> opencode-ai`)
+    if shutil.which('npm'):
+        print(f"Installing OpenCode CLI into {venv_dir} via npm (opencode-ai)...")
+        try:
+            subprocess.run(['npm', 'install', '--prefix', str(venv_dir), 'opencode-ai'], check=True)
+            npm_bin = venv_dir / 'node_modules' / '.bin' / ('opencode.cmd' if os.name == 'nt' else 'opencode')
+            installed_pkg_bin = venv_dir / 'node_modules' / 'opencode-ai' / 'bin' / exe_name
+            # Fallback for npm structure if node_modules/opencode-ai/bin has opencode.exe or opencode
+            if not installed_pkg_bin.is_file() and (venv_dir / 'node_modules' / 'opencode-ai' / 'bin' / 'opencode.exe').is_file():
+                installed_pkg_bin = venv_dir / 'node_modules' / 'opencode-ai' / 'bin' / 'opencode.exe'
+
+            src_bin = npm_bin if npm_bin.is_file() else (installed_pkg_bin if installed_pkg_bin.is_file() else None)
+            if src_bin:
+                if os.name == 'nt':
+                    wrapper = venv_bin_dir / 'opencode.cmd'
+                    wrapper.write_text(f'@echo off\r\n"{src_bin}" %*\r\n', encoding='utf-8')
+                else:
+                    if target_bin.exists() or target_bin.is_symlink():
+                        target_bin.unlink(missing_ok=True)
+                    target_bin.symlink_to(src_bin)
+                    try:
+                        src_bin.chmod(0o755)
+                    except Exception:
+                        pass
+                if is_binary_runnable(target_bin):
+                    print(f"OpenCode installed and verified in venv via npm ({src_bin}).")
+                    return True
+        except Exception as e:
+            print(f"Warning: venv npm install failed: {e}")
+
+    # 2. Secondary fallback: download official standalone binary release from GitHub
+    api_url = "https://api.github.com/repos/anomalyco/opencode/releases/latest"
     req = urllib.request.Request(api_url, headers={'User-Agent': 'llmCode-Installer/1.0'})
     try:
         with urllib.request.urlopen(req, timeout=12) as r:
@@ -868,12 +910,32 @@ def _install_opencode_into_venv(venv_dir: Path) -> bool:
         arch_tok = 'arm64' if arch_is_arm else 'x64'
         plat_tok = 'windows' if plat == 'windows' else ('darwin' if plat == 'macos' else 'linux')
 
-        matched_asset = None
+        is_musl = False
+        if plat == 'linux':
+            is_musl = any(Path(p).is_file() for p in ['/lib/ld-musl-x86_64.so.1', '/lib/ld-musl-aarch64.so.1'])
+
+        candidates = []
         for asset in rel.get('assets', []):
             aname = asset.get('name', '').lower()
-            if plat_tok in aname and arch_tok in aname and aname.endswith(('.zip', '.tar.gz', '.tgz')):
-                matched_asset = asset
-                break
+            if not aname.endswith(('.zip', '.tar.gz', '.tgz')):
+                continue
+            if plat_tok not in aname or arch_tok not in aname:
+                continue
+            if any(k in aname for k in ('desktop', '.deb', '.rpm', '.appimage')):
+                continue
+            score = 10
+            if is_musl and 'musl' in aname:
+                score += 20
+            elif not is_musl and 'musl' in aname:
+                score -= 100  # Avoid musl on glibc systems
+            if 'baseline' in aname:
+                score -= 10
+            if aname in (f"opencode-{plat_tok}-{arch_tok}.tar.gz", f"opencode-{plat_tok}-{arch_tok}.zip"):
+                score += 50
+            candidates.append((score, asset))
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        matched_asset = candidates[0][1] if candidates and candidates[0][0] > 0 else None
 
         if matched_asset:
             tmp_archive = venv_bin_dir / matched_asset['name']
@@ -895,32 +957,13 @@ def _install_opencode_into_venv(venv_dir: Path) -> bool:
                         target_bin.chmod(0o755)
                     break
             shutil.rmtree(extract_tmp, ignore_errors=True)
-            if target_bin.is_file():
+            if target_bin.is_file() and is_binary_runnable(target_bin):
                 print(f"OpenCode installed into venv at: {target_bin}")
                 return True
     except Exception:
         pass
 
-    # 2. Fallback: install via npm scoped to venv_dir (`npm install --prefix <venv_dir> opencode-ai`)
-    if shutil.which('npm'):
-        print(f"Installing OpenCode into {venv_dir} via npm...")
-        try:
-            subprocess.run(['npm', 'install', '--prefix', str(venv_dir), 'opencode-ai'], check=True)
-            npm_bin = venv_dir / 'node_modules' / '.bin' / ('opencode.cmd' if os.name == 'nt' else 'opencode')
-            if npm_bin.is_file():
-                if os.name == 'nt':
-                    wrapper = venv_bin_dir / 'opencode.cmd'
-                    wrapper.write_text(f'@echo off\r\n"{npm_bin}" %*\r\n', encoding='utf-8')
-                else:
-                    if target_bin.exists() or target_bin.is_symlink():
-                        target_bin.unlink(missing_ok=True)
-                    target_bin.symlink_to(npm_bin)
-                print(f"OpenCode installed in venv via npm ({npm_bin}).")
-                return True
-        except Exception as e:
-            print(f"Warning: venv npm install failed ({e}).")
-
-    print("Manual guidance for OpenCode: Install Node.js (https://nodejs.org) or download OpenCode into src/LLMServer/.venv/bin.")
+    print("Manual guidance for OpenCode: Ensure Node.js & npm (https://nodejs.org) are installed.")
     return False
 
 

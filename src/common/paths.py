@@ -250,12 +250,18 @@ def _discover_opencode() -> Optional[str]:
         venv_bin_dir / exe,
         venv_bin_dir / 'opencode.cmd',
         venv_dir / 'node_modules' / '.bin' / ('opencode.cmd' if os.name == 'nt' else 'opencode'),
+        venv_dir / 'node_modules' / 'opencode-ai' / 'bin' / 'opencode.exe',
         Path.home() / '.opencode' / 'bin' / exe,
         Path.home() / '.local' / 'bin' / exe,
     ]
     for c in candidates:
         if c.is_file():
-            return str(c.resolve())
+            try:
+                res = subprocess.run([str(c.resolve()), '--version'], capture_output=True, timeout=3)
+                if res.returncode == 0:
+                    return str(c.resolve())
+            except Exception:
+                pass
     found = shutil.which('opencode') or shutil.which('opencode2')
     return str(Path(found).resolve()) if found else None
 
