@@ -9,6 +9,7 @@ hardware-driven default tuning.
 import json
 import os
 import shutil
+import subprocess
 import sys
 import threading
 from datetime import datetime
@@ -36,6 +37,9 @@ HARDWARE_FILE = CONFIG_DIR / 'hardware.json'
 PID_FILE = CONFIG_DIR / 'llmserver.pid'
 LOG_FILE = LOG_DIR / 'llama-server.log'
 DAEMON_LOG_FILE = LOG_DIR / 'llmserver-daemon.log'
+API_KEY_FILE = CONFIG_DIR / 'api_key'
+AGENT_ENV_FILE = CONFIG_DIR / 'agent.env'
+DEPLOY_STATE_FILE = CONFIG_DIR / 'deploy_state.json'
 
 # Legacy file pointers
 SETTINGS_FILE = CONFIG_FILE
@@ -48,6 +52,50 @@ STANDARD_ALIASES = {
 }
 
 _config_lock = threading.RLock()
+
+
+def write_secret(path: Path, content: str) -> None:
+    """Writes sensitive credentials atomically with restricted user-only permissions (0o600 or Windows ACL)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(f'.tmp.{os.getpid()}')
+    try:
+        # On POSIX, set umask or create with 0o600
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        mode = 0o600
+        fd = os.open(str(tmp_path), flags, mode)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        if os.name == 'nt':
+            try:
+                username = os.environ.get('USERNAME', '')
+                if username:
+                    subprocess.run(
+                        ['icacls', str(tmp_path), '/inheritance:r', '/grant:r', f'{username}:F'],
+                        capture_output=True,
+                        check=False,
+                    )
+            except Exception:
+                pass
+        else:
+            try:
+                os.chmod(tmp_path, 0o600)
+            except Exception:
+                pass
+
+        os.replace(tmp_path, path)
+        if os.name != 'nt':
+            try:
+                os.chmod(path, 0o600)
+            except Exception:
+                pass
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
 
 
 def get_standard_alias(backend: str) -> str:

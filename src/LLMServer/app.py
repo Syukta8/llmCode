@@ -13,6 +13,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.common.paths import (
+    API_KEY_FILE,
+    AGENT_ENV_FILE,
     CONFIG_DIR as STORE,
     CONFIG_FILE,
     DAEMON_LOG_FILE,
@@ -27,6 +29,7 @@ from src.common.paths import (
     load_hardware,
     save_config,
     sync_config,
+    write_secret,
 )
 from src.common.process import detect_terminal, spawn_in_terminal, kill_process_tree
 from src.common.rag import (
@@ -103,17 +106,81 @@ def save_downloads():
 
 
 def load_settings():
-    """Load persisted settings from config/config.json."""
-    return load_config().get('settings', {})
+    """Load persisted settings from config/config.json, automatically purging any legacy permanent api_key."""
+    cfg = load_config()
+    st = cfg.get('settings', {})
+    if 'api_key' in st:
+        st.pop('api_key', None)
+        save_config(cfg)
+    return st
+
+
+_current_api_key: Optional[str] = None
+_key_rotated_at: Optional[str] = None
+
+
+def rotate_api_key() -> str:
+    """Generates a fresh random API key on each deploy and saves to restricted config/api_key and config/agent.env."""
+    global _current_api_key, _key_rotated_at
+    key = f"sk-{secrets.token_urlsafe(32)}"
+    write_secret(API_KEY_FILE, key)
+    agent_env_content = f"OPENAI_API_KEY={key}\nOPENAI_API_BASE=http://127.0.0.1:{PORT}/v1\n"
+    write_secret(AGENT_ENV_FILE, agent_env_content)
+    _current_api_key = key
+    _key_rotated_at = datetime.now().isoformat(timespec='seconds')
+    return key
+
+
+def get_current_api_key() -> Optional[str]:
+    """Retrieves active API key from memory or config/api_key."""
+    global _current_api_key
+    if _current_api_key:
+        return _current_api_key
+    if API_KEY_FILE.is_file():
+        try:
+            k = API_KEY_FILE.read_text(encoding='utf-8').strip()
+            if k:
+                _current_api_key = k
+                return k
+        except Exception:
+            pass
+    return None
+
+
+def clear_api_key() -> None:
+    """Removes active API key and deletes credentials from disk."""
+    global _current_api_key, _key_rotated_at
+    _current_api_key = None
+    _key_rotated_at = None
+    for f in (API_KEY_FILE, AGENT_ENV_FILE):
+        if f.is_file():
+            try:
+                f.unlink(missing_ok=True)
+            except Exception:
+                pass
+
 
 def get_or_create_api_key() -> str:
-    """Retrieves or auto-generates a secure random API key persisted in config/config.json."""
-    settings = load_settings()
-    key = settings.get('api_key') or os.environ.get('LLM_API_KEY')
+    """Backward-compatible wrapper returning current active API key, generating one if not yet initialized."""
+    key = get_current_api_key()
     if not key:
-        key = f"sk-{secrets.token_urlsafe(24)}"
-        save_settings({'api_key': key})
+        key = rotate_api_key()
     return key
+
+
+def mask_command_args(args: list) -> list:
+    """Masks sensitive credential values in logged CLI commands so secrets never leak into logs."""
+    masked = []
+    skip_next = False
+    for a in args:
+        if skip_next:
+            masked.append('***')
+            skip_next = False
+            continue
+        masked.append(a)
+        if a in ('--api-key', '--password', '--api-key-file'):
+            skip_next = True
+    return masked
 
 
 
@@ -155,6 +222,7 @@ class Deploy(BaseModel):
     repeat_penalty: float = Field(default=1.05, ge=0.0, le=3.0)
     main_gpu: int = Field(default=0, ge=0, le=16)
     split_mode: str = Field(default='layer', pattern='^(none|layer|row)$')
+    lan_access: bool = False
     custom_flags: str = ''
 
 
@@ -183,6 +251,7 @@ class OpenCodeLaunch(BaseModel):
     threads: int = Field(default=4, ge=1, le=256)
     batch: int = Field(default=2048, ge=32, le=65536)
     ubatch: int = Field(default=256, ge=32, le=16384)
+    reasoning: bool = True
     flash_attn: str = Field(default='on', pattern='^(on|off)$')
     kv_cache: str = Field(default='q8_0', pattern='^(f16|q8_0|q4_0)$')
     context_extend: str = Field(default='none', pattern=r'^(none|linear_2x|yarn_2x|yarn_4x|yarn_8x)$')
@@ -194,6 +263,7 @@ class OpenCodeLaunch(BaseModel):
     repeat_penalty: float = Field(default=1.05, ge=0.0, le=3.0)
     main_gpu: int = Field(default=0, ge=0, le=16)
     split_mode: str = Field(default='layer', pattern='^(none|layer|row)$')
+    lan_access: bool = False
     custom_flags: str = ''
     restore_history: bool = False
     session_id: str = ''
@@ -209,6 +279,7 @@ class AiderLaunch(BaseModel):
     threads: int = Field(default=4, ge=1, le=256)
     batch: int = Field(default=2048, ge=32, le=65536)
     ubatch: int = Field(default=256, ge=32, le=16384)
+    reasoning: bool = True
     flash_attn: str = Field(default='on', pattern='^(on|off)$')
     kv_cache: str = Field(default='q8_0', pattern='^(f16|q8_0|q4_0)$')
     context_extend: str = Field(default='none', pattern=r'^(none|linear_2x|yarn_2x|yarn_4x|yarn_8x)$')
@@ -220,6 +291,7 @@ class AiderLaunch(BaseModel):
     repeat_penalty: float = Field(default=1.05, ge=0.0, le=3.0)
     main_gpu: int = Field(default=0, ge=0, le=16)
     split_mode: str = Field(default='layer', pattern='^(none|layer|row)$')
+    lan_access: bool = False
     custom_flags: str = ''
     edit_format: str = Field(default='diff', pattern=r'^(diff|whole|udiff|architect)$')
     restore_history: bool = False
@@ -244,7 +316,8 @@ def http_json(url, timeout=8):
 
 
 def server_health():
-    headers = {'Authorization': f'Bearer {get_or_create_api_key()}'}
+    curr_key = get_current_api_key()
+    headers = {'Authorization': f'Bearer {curr_key}'} if curr_key else {}
     try:
         with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{PORT}/health', headers=headers), timeout=2) as r:
             return json.loads(r.read(3_000_000))
@@ -333,7 +406,12 @@ def system_status():
         'model_dir_exists': MODEL_DIR.is_dir(),
         'config_file': str(CONFIG_FILE),
         'server_port': PORT,
-        'api_key': get_or_create_api_key(),
+        'api_key': get_current_api_key(),
+        'key_rotated_at': _key_rotated_at,
+        'agents_running': bool(
+            (opencode_proc is not None and opencode_proc.poll() is None) or
+            (aider_proc is not None and aider_proc.poll() is None)
+        ),
         'platform': sys.platform,
     }
 
@@ -454,6 +532,10 @@ def launch_backend_process(backend, path, params):
     ext_flags = build_context_extension_flags(backend, ctx_ext)
     custom_args = [arg for arg in params.custom_flags.split() if arg.strip()] if getattr(params, 'custom_flags', None) else []
 
+    key = rotate_api_key()
+    lan = bool(getattr(params, 'lan_access', False))
+    bind_host = '127.0.0.1' if backend == 'ollama' or not lan else '0.0.0.0'
+
     if backend == 'koboldcpp':
         if not kobold_bin.is_file():
             raise HTTPException(400, f'koboldcpp not found at {kobold_bin}')
@@ -466,7 +548,8 @@ def launch_backend_process(backend, path, params):
             '--threads', str(params.threads),
             '--blasbatchsize', str(params.batch),
             '--usemmap',
-            '--skiplauncher', '--quiet', '--host', '0.0.0.0',
+            '--skiplauncher', '--quiet', '--host', bind_host,
+            '--password', key,
         ]
         if params.layers > 0 and sys.platform != 'darwin':
             args.append('--usecuda')
@@ -515,8 +598,8 @@ def launch_backend_process(backend, path, params):
             raise HTTPException(400, f'llama-server not found at {server_bin}')
         args = [
             str(server_bin), '--model', str(path), '--alias', params.alias,
-            '--host', '0.0.0.0', '--port', str(PORT),
-            '--api-key', get_or_create_api_key(),
+            '--host', bind_host, '--port', str(PORT),
+            '--api-key-file', str(API_KEY_FILE),
             '--ctx-size', str(params.context),
             '--n-gpu-layers', str(params.layers),
             '--threads', str(params.threads),
@@ -545,14 +628,15 @@ def launch_backend_process(backend, path, params):
 
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     log_handle = open(LOG_FILE, 'a', buffering=1, encoding='utf-8')
-    cmd_str = ' '.join(f'"{a}"' if ' ' in a else a for a in args)
+    masked_args = mask_command_args(args)
+    cmd_str = ' '.join(f'"{a}"' if ' ' in a else a for a in masked_args)
     log_handle.write(f'\n===== [{backend}] {datetime.now().isoformat(timespec="seconds")} =====\n')
     log_handle.write(f'[COMMAND] {cmd_str}\n')
     log_handle.flush()
 
     env = os.environ.copy()
     if backend == 'ollama':
-        env['OLLAMA_HOST'] = f'0.0.0.0:{PORT}'
+        env['OLLAMA_HOST'] = f'127.0.0.1:{PORT}'
 
     # Ensure the binary's directory is in PATH so Windows finds companion CUDA DLLs (ggml-cuda.dll, cublas64_*.dll)
     bin_parent = str(Path(args[0]).resolve().parent)
@@ -630,6 +714,8 @@ def start(params: Deploy):
             'last_repeat_penalty': params.repeat_penalty,
             'last_main_gpu': params.main_gpu,
             'last_split_mode': params.split_mode,
+            'last_lan_access': params.lan_access,
+            'last_reasoning': params.reasoning,
             'last_custom_flags': params.custom_flags,
         })
         return {'ok': True, 'pid': proc.pid, 'command': args, 'message': f'[{params.backend}] launching; health may take time to become ready.'}
@@ -639,6 +725,7 @@ def start(params: Deploy):
 def stop():
     global proc
     with lock:
+        clear_api_key()
         if not alive():
             return {'ok': True, 'message': 'No dashboard-managed server running'}
         pid = proc.pid
@@ -831,11 +918,32 @@ def opencode_status():
     }
 
 
+def ensure_git_ignored(project_dir: Path, filename: str = 'opencode.json') -> None:
+    """Ensures configuration files with local paths or tokens are gitignored in the project directory."""
+    git_dir = project_dir / '.git'
+    gitignore_file = project_dir / '.gitignore'
+    if git_dir.is_dir() or gitignore_file.is_file():
+        existing = ''
+        if gitignore_file.is_file():
+            try:
+                existing = gitignore_file.read_text(encoding='utf-8')
+            except Exception:
+                existing = ''
+        lines = [line.strip() for line in existing.splitlines()]
+        if filename not in lines and f'/{filename}' not in lines:
+            prefix = '\n' if existing and not existing.endswith('\n') else ''
+            try:
+                with open(gitignore_file, 'a', encoding='utf-8') as f:
+                    f.write(f"{prefix}{filename}\n")
+            except Exception:
+                pass
+
+
 def write_opencode_config(project_dir: Path, alias: str, port: int, rag_context_file: Optional[Path] = None) -> Path:
     """
     Writes or updates opencode.json in the target project directory so OpenCode CLI
-    connects directly to the local backend API using the standard alias,
-    enables build agent, full edit/bash tools, and sets reasoning effort to high.
+    connects directly to the local backend API using standard alias and file-referenced API key,
+    with reasoning enabled.
     """
     cfg_path = project_dir / 'opencode.json'
     data = {}
@@ -851,15 +959,12 @@ def write_opencode_config(project_dir: Path, alias: str, port: int, rag_context_
         'name': f'llmCode ({alias})',
         'options': {
             'baseURL': f'http://127.0.0.1:{port}/v1',
-            'apiKey': 'EMPTY',
+            'apiKey': f'{{file:{API_KEY_FILE.as_posix()}}}',
         },
         'models': {
             alias: {
                 'name': alias,
                 'reasoning': True,
-                'reasoning_options': [
-                    {'type': 'effort', 'values': ['high']}
-                ]
             }
         }
     }
@@ -879,6 +984,7 @@ def write_opencode_config(project_dir: Path, alias: str, port: int, rag_context_
     if rag_context_file and rag_context_file.is_file():
         data['instructions'] = [str(rag_context_file.resolve())]
     cfg_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+    ensure_git_ignored(project_dir, 'opencode.json')
     return cfg_path
 
 
@@ -928,6 +1034,8 @@ def launch_opencode(params: OpenCodeLaunch):
         'last_repeat_penalty': params.repeat_penalty,
         'last_main_gpu': params.main_gpu,
         'last_split_mode': params.split_mode,
+        'last_lan_access': params.lan_access,
+        'last_reasoning': params.reasoning,
         'last_custom_flags': params.custom_flags,
         'last_project_dir': str(project),
     })
@@ -1024,14 +1132,19 @@ def launch_aider(params: AiderLaunch):
         'last_repeat_penalty': params.repeat_penalty,
         'last_main_gpu': params.main_gpu,
         'last_split_mode': params.split_mode,
+        'last_lan_access': params.lan_access,
+        'last_reasoning': params.reasoning,
         'last_custom_flags': params.custom_flags,
         'last_project_dir': str(project),
         'last_edit_format': params.edit_format,
     })
 
+    if not AGENT_ENV_FILE.is_file():
+        raise HTTPException(400, 'Agent environment file not found (config/agent.env). Deploy backend server first.')
+
     model_arg = f'openai/{params.alias}'
     edit_arg = f'--edit-format {params.edit_format}'
-    aider_cmd = f'"{aider_bin}" --openai-api-base http://127.0.0.1:{PORT}/v1 --openai-api-key none --model {model_arg} {edit_arg} --stream --dark-mode --auto-accept-architect --yes-always --auto-commits --reasoning-effort high'
+    aider_cmd = f'"{aider_bin}" --env-file "{AGENT_ENV_FILE}" --model {model_arg} {edit_arg} --stream --dark-mode --auto-accept-architect --yes-always --auto-commits'
     if params.rag_enabled:
         index_workspace(project)
         aider_cmd += f' --read "{RAG_CONTEXT_FILE}"'

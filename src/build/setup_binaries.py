@@ -987,7 +987,7 @@ def setup_continue_config(continue_dir: Optional[Path] = None, port: int = 8080,
             f"    provider: openai\n"
             f"    model: llamacpp\n"
             f"    apiBase: {api_base}\n"
-            f"    apiKey: EMPTY\n"
+            f"    apiKey: <PASTE_API_KEY_FROM_DASHBOARD>\n"
             f"    roles:\n"
             f"      - chat\n"
             f"      - edit\n"
@@ -996,7 +996,7 @@ def setup_continue_config(continue_dir: Optional[Path] = None, port: int = 8080,
             f"    provider: openai\n"
             f"    model: koboldcpp\n"
             f"    apiBase: {api_base}\n"
-            f"    apiKey: EMPTY\n"
+            f"    apiKey: <PASTE_API_KEY_FROM_DASHBOARD>\n"
             f"    roles:\n"
             f"      - chat\n"
             f"      - edit\n"
@@ -1005,7 +1005,7 @@ def setup_continue_config(continue_dir: Optional[Path] = None, port: int = 8080,
             f"    provider: openai\n"
             f"    model: ollama\n"
             f"    apiBase: {api_base}\n"
-            f"    apiKey: EMPTY\n"
+            f"    apiKey: <PASTE_API_KEY_FROM_DASHBOARD>\n"
             f"    roles:\n"
             f"      - chat\n"
             f"      - edit\n"
@@ -1039,14 +1039,36 @@ def setup_continue_config(continue_dir: Optional[Path] = None, port: int = 8080,
                 'provider': 'openai',
                 'model': alias,
                 'apiBase': api_base,
-                'apiKey': 'EMPTY',
+                'apiKey': '<PASTE_API_KEY_FROM_DASHBOARD>',
             })
         data['models'] = models
         target_file.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
         print(f"Updated {target_file} with standard aliases: llamacpp, koboldcpp, ollama")
+        print("Notice: Each backend deployment generates a fresh API key. Copy it from the dashboard status bar and paste it into Continue.")
         return target_file
 
     return None
+
+
+def render_desktop_entry(repo_root: Path = REPO_ROOT) -> Optional[Path]:
+    """Renders bin/llmCode.desktop from bin/llmCode.desktop.in with absolute paths."""
+    in_file = repo_root / 'bin' / 'llmCode.desktop.in'
+    out_file = repo_root / 'bin' / 'llmCode.desktop'
+    if not in_file.is_file():
+        return None
+    try:
+        content = in_file.read_text(encoding='utf-8')
+        rendered = content.replace('@LLMCODE_DIR@', str(repo_root.resolve()))
+        out_file.write_text(rendered, encoding='utf-8')
+        if os.name != 'nt':
+            try:
+                out_file.chmod(0o755)
+            except Exception:
+                pass
+        return out_file
+    except Exception as e:
+        print(f"Warning: Failed to render desktop entry: {e}")
+        return None
 
 
 # ==============================================================================
@@ -1058,7 +1080,7 @@ def uninstall_all(repo_root: Optional[Path] = None, non_interactive: bool = Fals
     - Stops all running llm-dash and backend engine processes
     - Deletes src/LLMServer/.venv
     - Deletes src/llama.cpp, src/koboldcpp, src/ollama
-    - Deletes downloaded binaries in bin/ (preserving bin/llmCode.desktop and bin/llmCode.svg)
+    - Deletes downloaded binaries in bin/ (preserving bin/llmCode.desktop.in and bin/llmCode.svg)
     - Deletes all downloaded GGUF models in models/
     - Deletes config/ and logs/
     """
@@ -1107,7 +1129,7 @@ def uninstall_all(repo_root: Optional[Path] = None, non_interactive: bool = Fals
     bin_dir = root / 'bin'
     if bin_dir.is_dir():
         for item in bin_dir.iterdir():
-            if item.name not in ('llmCode.desktop', 'llmCode.svg'):
+            if item.name not in ('llmCode.desktop', 'llmCode.desktop.in', 'llmCode.svg'):
                 if item.is_dir() and not item.is_symlink():
                     shutil.rmtree(item, ignore_errors=True)
                 else:
@@ -1202,7 +1224,10 @@ def main(non_interactive: bool = False, uninstall: bool = False):
     # 6. Offer to configure VS Code Continue if ~/.continue/config.yaml or config.json exists
     setup_continue_config(non_interactive=non_interactive)
 
-    # 7. Sync all resolved paths & hardware-tuned defaults into config/config.json
+    # 7. Render desktop entry template with absolute paths
+    render_desktop_entry()
+
+    # 8. Sync all resolved paths & hardware-tuned defaults into config/config.json
     cfg = sync_config(apply_hardware_defaults=True)
     print("\n=== Configuration Database Updated (config/config.json & config/hardware.json) ===")
     print(f"  Hardware Profile : {HARDWARE_FILE}")

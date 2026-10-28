@@ -16,10 +16,13 @@ VENV_PY="$VENV_DIR/bin/python3"
 VENV_PIP="$VENV_DIR/bin/pip"
 
 # Handle --uninstall before touching or creating .venv
+IS_FULL=0
 for arg in "$@"; do
     if [[ "$arg" == "--uninstall" ]]; then
         python3 "$SCRIPT_DIR/llmcode.py" setup "$@"
         exit 0
+    elif [[ "$arg" == "--full" ]]; then
+        IS_FULL=1
     fi
 done
 
@@ -74,6 +77,14 @@ if [[ ! -d "$VENV_DIR" ]]; then
             exit 1
         fi
     fi
+fi
+
+# Check for existing deployment and perform incremental update check
+DEPLOY_STATE="$SCRIPT_DIR/config/deploy_state.json"
+if [[ "$IS_FULL" -eq 0 ]] && [[ -f "$DEPLOY_STATE" ]]; then
+    echo "Existing deployment detected. Running incremental update check..."
+    "$VENV_PY" "$SCRIPT_DIR/llmcode.py" check-update "$@"
+    exit 0
 fi
 
 # 3. Install core dashboard requirements

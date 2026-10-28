@@ -9,6 +9,7 @@ Scans your hardware & packages into `config/hardware.json`, auto-tunes `llama.cp
 
 ```cmd
 :: 1. Scan hardware, compile/download backends, install Aider & OpenCode in .venv, configure Continue
+:: (Automatically performs incremental updates after git pull; use --full to force complete setup)
 setup.bat
 
 :: 2. Launch llm-dash in background and open browser (http://127.0.0.1:7860)
@@ -27,6 +28,7 @@ setup.bat --uninstall
 
 ```bash
 # 1. Scan hardware, compile/download backends, install Aider & OpenCode in .venv, configure Continue
+# (Automatically performs incremental updates after git pull; use --full to force complete setup)
 ./setup.sh
 
 # 2. Launch llm-dash in background and open browser (http://127.0.0.1:7860)
@@ -45,6 +47,7 @@ setup.bat --uninstall
 
 ```bash
 # 1. Scan hardware (Apple Metal), compile/download backends, install Aider & OpenCode in .venv, configure Continue
+# (Automatically performs incremental updates after git pull; use --full to force complete setup)
 ./setup.sh
 
 # 2. Launch llm-dash in background and open browser (http://127.0.0.1:7860)
@@ -59,36 +62,12 @@ setup.bat --uninstall
 
 ---
 
-## Standard Backend Aliases (`http://127.0.0.1:8080/v1`)
+## Incremental Post-Pull Updates
 
-All integrations (**VS Code Continue**, **Aider**, **OpenCode**) connect using a fixed alias per backend engine so you never need to rewrite config files when switching GGUF models:
-- `llama.cpp` -> **`llamacpp`**
-- `KoboldCpp` -> **`koboldcpp`**
-- `Ollama` -> **`ollama`**
+Running `setup.sh` or `setup.bat` after `git pull` checks `config/deploy_state.json`:
+- **Python dependencies (`requirements.txt`)**: Re-runs `pip install` only.
+- **Paths & Config (`paths.py`)**: Auto-syncs `config.json` database.
+- **Engine Source (`setup_binaries.py`)**: Prompts before rebuilding/redownloading.
+- **Server code (`app.py`, `src/common/`)**: Prompts before restarting active background services.
+- Run `python llmcode.py check-update` directly or `./setup.sh --full` to force complete reinstallation.
 
----
-
-## Folder Structure
-
-```text
-llmCode/
-├── setup.bat / setup.sh     # Hardware scanner, engine installer, .venv agent setup & --uninstall
-├── launch.bat / launch.sh   # Auto-syncs config/config.json and starts llm-dash daemon
-├── stop.bat / stop.sh       # Stops llm-dash and all active backend servers
-├── llmcode.py               # Cross-platform CLI runner
-├── config/
-│   ├── hardware.json        # Auto-scanned CPU/RAM/GPU/VRAM, package paths & build/runtime tuning
-│   ├── config.json          # Auto-healed database (paths, binaries, settings, downloads)
-│   ├── rag_index.json       # Local BM25/TF-IDF workspace chunk index (when RAG is enabled)
-│   └── rag_context.md       # Auto-generated workspace RAG context injected into Aider & OpenCode
-├── src/
-│   ├── llama.cpp/           # llama.cpp source & build
-│   ├── koboldcpp/           # KoboldCpp source & build
-│   ├── ollama/              # Ollama source & build
-│   ├── build/               # Hardware scanner, prerequisite checker, compiler & uninstaller
-│   ├── common/              # Cross-platform paths, process management & Workspace RAG engine
-│   └── LLMServer/           # FastAPI Web Dashboard (llm-dash) + .venv (Aider & OpenCode)
-├── bin/                     # Prebuilt binaries & desktop assets
-├── models/                  # Local GGUF models
-└── logs/                    # Daemon & inference engine logs
-```

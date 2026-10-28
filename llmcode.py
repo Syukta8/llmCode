@@ -19,8 +19,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.common.paths import (
+    AGENT_ENV_FILE,
+    API_KEY_FILE,
     CONFIG_FILE,
     DAEMON_LOG_FILE,
+    DEPLOY_STATE_FILE,
     LOG_FILE,
     MODEL_DIR,
     PID_FILE,
@@ -103,7 +106,101 @@ def cmd_setup(args):
     run_binary_setup(non_interactive=getattr(args, 'non_interactive', False))
 
     sync_config(apply_hardware_defaults=True)
+    from src.build.deploy_state import save_deploy_state
+    save_deploy_state(REPO_ROOT)
     print(f"\nSetup completed. Configuration saved to: {CONFIG_FILE}")
+    return 0
+
+
+def cmd_check_update(args):
+    """
+    Analyzes current git status / file differences against last deployment state
+    and executes only the necessary update steps (pip, config_sync, engines, restart_dashboard).
+    """
+    from src.build.deploy_state import diff_components, save_deploy_state
+    res = diff_components(REPO_ROOT)
+
+    if not res['has_prior_state']:
+        print("No prior deployment state found (config/deploy_state.json). Running full setup...")
+        return cmd_setup(args)
+
+    steps = res['steps']
+    changed = res['changed_files']
+
+    if not steps:
+        print("✓ All deployment components are up to date with repository state.")
+        save_deploy_state(REPO_ROOT)
+        return 0
+
+    print("=== llmCode Incremental Update Check ===")
+    print(f"Detected {len(changed)} changed file(s):")
+    for f in changed[:10]:
+        print(f"  • {f}")
+    if len(changed) > 10:
+        print(f"  ... and {len(changed) - 10} more.")
+
+    print(f"\nAffected update step(s): {', '.join(steps)}")
+    non_interactive = getattr(args, 'yes', False) or getattr(args, 'non_interactive', False)
+
+    if 'full' in steps:
+        print("\nCore setup script or CLI changed. Running full setup...")
+        return cmd_setup(args)
+
+    py_exe = get_python_exe()
+    server_dir = REPO_ROOT / 'src' / 'LLMServer'
+
+    if 'pip' in steps:
+        print("\n[Step: pip] Updating dashboard requirements...")
+        subprocess.run([py_exe, '-m', 'pip', 'install', '-q', '-r', str(server_dir / 'requirements.txt')], check=True)
+
+    if 'config_sync' in steps:
+        print("\n[Step: config_sync] Synchronizing configuration database and paths...")
+        sync_config(apply_hardware_defaults=True)
+
+    if 'desktop_entry' in steps:
+        from src.build.setup_binaries import render_desktop_entry
+        print("\n[Step: desktop_entry] Updating desktop application entry...")
+        render_desktop_entry(REPO_ROOT)
+
+    if 'engines' in steps:
+        print("\n[Step: engines] Backend engine build scripts changed.")
+        print("  Estimated time: Compiling from source may take several minutes; prebuilt binaries take < 1 min.")
+        proceed = True
+        if not non_interactive:
+            ans = input("Re-run backend engine setup now? [y/N]: ").strip().lower()
+            proceed = ans in ('y', 'yes')
+        if proceed:
+            from src.build.setup_binaries import main as run_engine_setup
+            run_engine_setup(non_interactive=non_interactive)
+        else:
+            print("Skipping engine update.")
+
+    if 'restart_dashboard' in steps:
+        # Check if services are currently running
+        is_running = False
+        if PID_FILE.is_file():
+            try:
+                pid = int(PID_FILE.read_text(encoding='utf-8').strip())
+                is_running = is_pid_alive(pid)
+            except Exception:
+                pass
+
+        if is_running:
+            print("\n[Step: restart_dashboard] Server or common modules changed and dashboard daemon is active.")
+            restart = True
+            if not non_interactive:
+                ans = input("Restart dashboard services now to load updated code? [y/N]: ").strip().lower()
+                restart = ans in ('y', 'yes')
+            if restart:
+                print("Restarting dashboard daemon...")
+                cmd_stop(args)
+                time.sleep(1)
+                cmd_dash(args)
+            else:
+                print("Dashboard restart skipped. Changes will take effect on next launch.")
+
+    save_deploy_state(REPO_ROOT)
+    print("\n✓ Incremental update completed successfully.")
     return 0
 
 
@@ -150,6 +247,10 @@ def cmd_serve(args):
         print(f"Error: llama-server binary not found at {llama_bin}. Run setup first.")
         return 1
 
+    host = getattr(args, 'host', '127.0.0.1')
+    if host not in ('127.0.0.1', 'localhost'):
+        print(f"Notice: Binding server to '{host}' (LAN accessible).")
+
     model_file = None
     if args.model:
         for p in MODEL_DIR.rglob('*.gguf'):
@@ -170,7 +271,7 @@ def cmd_serve(args):
         str(llama_bin),
         '--model', str(model_file),
         '--alias', args.alias or 'llamacpp',
-        '--host', getattr(args, 'host', '0.0.0.0'),
+        '--host', host,
         '--port', str(args.port),
         '--ctx-size', str(args.context),
         '--n-gpu-layers', str(args.layers),
@@ -202,7 +303,9 @@ def cmd_dash(args):
     """Launch the Web Dashboard (FastAPI server on port 7860) in foreground or background daemon mode."""
     cfg = sync_config()
     port = args.port or cfg.get('settings', {}).get('dash_port', 7860)
-    host = getattr(args, "host", "0.0.0.0")
+    host = getattr(args, "host", "127.0.0.1")
+    if host not in ('127.0.0.1', 'localhost'):
+        print(f"WARNING: Binding dashboard to '{host}' exposes dashboard controls without authentication. Restrict access or use a firewall.")
     url = f"http://{'127.0.0.1' if host == '0.0.0.0' else host}:{port}"
 
     # Check if already running
@@ -227,7 +330,7 @@ def cmd_dash(args):
     cmd = [
         py_exe, '-m', 'uvicorn', 'app:app',
         '--app-dir', str(server_dir),
-        '--host', getattr(args, 'host', '0.0.0.0'),
+        '--host', host,
         '--port', str(port),
     ]
 
@@ -285,11 +388,15 @@ def cmd_stop(args):
 
 def cmd_aider(args):
     """Spawn Aider connected to the running local server in an interactive terminal."""
+    if not AGENT_ENV_FILE.is_file():
+        print(f"Error: Agent environment credentials not found at {AGENT_ENV_FILE}.")
+        print("Deploy a backend engine first via web dashboard before launching Aider.")
+        return 1
     cfg = sync_config()
     aider_bin = cfg.get('agents', {}).get('aider') or 'aider'
     alias = cfg.get('settings', {}).get('last_alias') or 'llamacpp'
     target_dir = Path(args.dir).expanduser().resolve()
-    aider_cmd = f'"{aider_bin}" --openai-api-base http://127.0.0.1:{args.port}/v1 --openai-api-key none --model openai/{alias} --stream'
+    aider_cmd = f'"{aider_bin}" --env-file "{AGENT_ENV_FILE}" --model openai/{alias} --stream'
     print(f"Launching Aider in {target_dir} (model: openai/{alias})...")
     spawn_in_terminal(aider_cmd, cwd=target_dir, title="llmCode Aider")
     return 0
@@ -304,6 +411,12 @@ def main():
     p_setup.add_argument("-y", "--non-interactive", action="store_true", help="Run setup with default choices without prompting")
     p_setup.add_argument("--uninstall", action="store_true", help="Completely uninstall all llmCode components, binaries, venv, configs, and models")
     p_setup.set_defaults(func=cmd_setup)
+
+    # check-update
+    p_check = subparsers.add_parser("check-update", help="Check for git/file updates and run incremental deployment steps")
+    p_check.add_argument("-y", "--yes", action="store_true", help="Automatically accept recommended update steps without prompting")
+    p_check.add_argument("--non-interactive", action="store_true", help="Run without interactive confirmation")
+    p_check.set_defaults(func=cmd_check_update)
 
     # download
     p_dl = subparsers.add_parser("download", help="Download GGUF model")
@@ -328,7 +441,7 @@ def main():
     p_serve.add_argument("--flash-attn", default="on", choices=["on", "off"], help="Flash attention")
     p_serve.add_argument("--kv-cache", default="q8_0", choices=["f16", "q8_0", "q4_0"], help="KV cache quantization")
     p_serve.add_argument("--port", type=int, default=8080, help="Port to listen on")
-    p_serve.add_argument("--host", default="0.0.0.0", help="Host address to bind to")
+    p_serve.add_argument("--host", default="127.0.0.1", help="Host address to bind to (default: 127.0.0.1)")
     p_serve.add_argument("--alias", default="", help="Model alias")
     p_serve.add_argument("--custom-flags", default="", help="Additional raw flags to pass")
     p_serve.set_defaults(func=cmd_serve)
@@ -336,7 +449,7 @@ def main():
     # dash
     p_dash = subparsers.add_parser("dash", help="Start Web Dashboard (llm-dash)")
     p_dash.add_argument("--port", type=int, default=7860, help="Dashboard port")
-    p_dash.add_argument("--host", default="0.0.0.0", help="Host address to bind to")
+    p_dash.add_argument("--host", default="127.0.0.1", help="Host address to bind to (default: 127.0.0.1)")
     p_dash.add_argument("--daemon", action="store_true", help="Run dashboard as background daemon")
     p_dash.add_argument("--no-browser", action="store_true", help="Do not auto-open browser")
     p_dash.set_defaults(func=cmd_dash)

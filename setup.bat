@@ -11,10 +11,14 @@ set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
 REM Check for --uninstall before touching .venv (avoids Windows file lock on .venv\Scripts\python.exe)
+set "IS_FULL=0"
 for %%A in (%*) do (
     if /i "%%~A"=="--uninstall" (
         python "%SCRIPT_DIR%llmcode.py" setup %*
         exit /b 0
+    )
+    if /i "%%~A"=="--full" (
+        set "IS_FULL=1"
     )
 )
 
@@ -38,6 +42,12 @@ if %errorlevel% neq 0 (
 if not exist "%VENV_PY%" (
     echo Creating virtual environment at %VENV_DIR%...
     python -m venv "%VENV_DIR%"
+)
+
+if "%IS_FULL%"=="0" if exist "%SCRIPT_DIR%config\deploy_state.json" (
+    echo Existing deployment detected. Running incremental update check...
+    "%VENV_PY%" "%SCRIPT_DIR%llmcode.py" check-update %*
+    exit /b %errorlevel%
 )
 
 echo Installing core dashboard dependencies...

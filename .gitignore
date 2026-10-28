@@ -31,3 +31,10 @@ models/
 *.so
 *.dll
 *.exe
+
+# User-specific & local untracked files
+bin/llmCode.desktop
+MEMORY.md
+MISTAKES.md
+opencode.json
+

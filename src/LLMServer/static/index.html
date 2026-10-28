@@ -362,6 +362,11 @@
     </div>
   </div>
 
+  <div id="keyRotatedBanner" style="display:none; background:#ff444422; border:1px solid #ff444466; color:#ff8888; padding:8px 14px; border-radius:6px; margin-bottom:14px; font-size:12.5px; align-items:center; justify-content:space-between;">
+    <span><strong>API Key Rotated:</strong> Backend restarted with a fresh API key. Active Aider or OpenCode terminal sessions will get 401 until relaunched.</span>
+    <button class="subtle" onclick="$('keyRotatedBanner').style.display='none'" style="padding:2px 8px; font-size:11px;">Dismiss</button>
+  </div>
+
   <!-- Primary Model & Engine Deploy Card -->
   <div class="card">
     <div class="card-header">
@@ -467,6 +472,20 @@
               <button class="subtle" type="button" onclick="triggerRagIndex()" title="Index workspace now">Index</button>
             </div>
           </div>
+          <div class="field">
+            <label>Reasoning / Thinking Mode</label>
+            <select id="reasoning">
+              <option value="true" selected>ON (Reasoning active)</option>
+              <option value="false">OFF (Standard generation)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>LAN Exposure <span id="lanNotice" class="badge">127.0.0.1</span></label>
+            <select id="lanAccess" onchange="onLanAccessChange()">
+              <option value="false" selected>OFF (127.0.0.1 - Loopback only)</option>
+              <option value="true">ON (0.0.0.0 - Expose on local network)</option>
+            </select>
+          </div>
         </div>
       </div>
     </details>
@@ -562,6 +581,11 @@
         <input id="historyTarget" class="mono" placeholder=".aider.chat.history.md or OpenCode session ID">
       </div>
     </div>
+  </div>
+
+  <div id="keyRotatedBanner" style="display:none; background:#ff444422; border:1px solid #ff444466; color:#ff8888; padding:8px 14px; border-radius:6px; margin-bottom:14px; font-size:12.5px; align-items:center; justify-content:space-between;">
+    <span><strong>API Key Rotated:</strong> Backend restarted with a fresh API key. Active Aider or OpenCode terminal sessions will get 401 until relaunched.</span>
+    <button class="subtle" onclick="$('keyRotatedBanner').style.display='none'" style="padding:2px 8px; font-size:11px;">Dismiss</button>
   </div>
 
   <!-- Local Models & Hugging Face Catalog Tabs -->
@@ -691,7 +715,25 @@ function standardAliasFor(be) {
 function onBackendChange() {
   const be = $('backendEngine').value;
   $('alias').value = standardAliasFor(be);
+  const lanSel = $('lanAccess');
+  const lanNote = $('lanNotice');
+  if (be === 'ollama') {
+    lanSel.value = 'false';
+    lanSel.disabled = true;
+    if (lanNote) lanNote.textContent = 'Ollama loopback only (no auth)';
+  } else {
+    lanSel.disabled = false;
+    onLanAccessChange();
+  }
   toast('Switched backend to ' + be + ' (alias: ' + $('alias').value + ')');
+}
+
+function onLanAccessChange() {
+  const lan = $('lanAccess').value === 'true';
+  const lanNote = $('lanNotice');
+  if (lanNote) {
+    lanNote.textContent = lan ? '0.0.0.0 (LAN exposed)' : '127.0.0.1 (Local only)';
+  }
 }
 
 async function refreshStatus() {
@@ -726,6 +768,10 @@ async function refreshStatus() {
 
     $('connection').textContent = s.binary_exists ? 'Backend Engine Ready' : 'Binary Not Installed';
     if (s.api_key) {
+      if (window.currentApiKey && window.currentApiKey !== s.api_key && s.agents_running) {
+        let b = $('keyRotatedBanner');
+        if (b) b.style.display = 'flex';
+      }
       window.currentApiKey = s.api_key;
       let el = $('apiKeyDisplay');
       if (el) el.textContent = s.api_key.substring(0, 7) + '...' + s.api_key.substring(s.api_key.length - 4);
@@ -842,6 +888,8 @@ function getDeployPayload() {
     kv_cache: $('kvCache').value,
     context_extend: $('contextExtend').value,
     rag_enabled: $('ragEnabled').value === 'true',
+    reasoning: $('reasoning').value === 'true',
+    lan_access: $('lanAccess').value === 'true',
     temp: +$('temp').value,
     top_p: +$('top_p').value,
     top_k: +$('top_k').value,
@@ -1116,6 +1164,9 @@ async function init() {
     if (s.last_repeat_penalty !== undefined) $('repeat_penalty').value = s.last_repeat_penalty;
     if (s.last_main_gpu !== undefined) $('main_gpu').value = s.last_main_gpu;
     if (s.last_split_mode) $('split_mode').value = s.last_split_mode;
+    if (s.last_reasoning !== undefined) $('reasoning').value = s.last_reasoning ? 'true' : 'false';
+    if (s.last_lan_access !== undefined) $('lanAccess').value = s.last_lan_access ? 'true' : 'false';
+    onBackendChange();
     if (s.last_custom_flags) $('custom_flags').value = s.last_custom_flags;
     if (s.last_edit_format) $('editFormat').value = s.last_edit_format;
   } catch(e) {}
