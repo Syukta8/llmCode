@@ -143,7 +143,7 @@ class Deploy(BaseModel):
     threads: int = Field(default=4, ge=1, le=256)
     batch: int = Field(default=2048, ge=32, le=65536)
     ubatch: int = Field(default=256, ge=32, le=16384)
-    reasoning: bool = False
+    reasoning: bool = True
     flash_attn: str = Field(default='on', pattern='^(on|off)$')
     kv_cache: str = Field(default='q8_0', pattern='^(f16|q8_0|q4_0)$')
     context_extend: str = Field(default='none', pattern=r'^(none|linear_2x|yarn_2x|yarn_4x|yarn_8x)$')
@@ -469,6 +469,8 @@ def launch_backend_process(backend, path, params):
             f"PARAMETER top_k {params.top_k}",
             f"PARAMETER repeat_penalty {params.repeat_penalty}",
         ]
+        if getattr(params, 'reasoning', True):
+            modelfile_content.append("PARAMETER think true")
         modelfile_path.write_text("\n".join(modelfile_content) + "\n", encoding='utf-8')
 
         # Register/create model in Ollama library so Continue and OpenAI endpoints recognise it
@@ -509,7 +511,7 @@ def launch_backend_process(backend, path, params):
         if hasattr(params, 'reasoning') and not params.reasoning:
             args += ['--reasoning', 'off']
         else:
-            args += ['--reasoning', 'on', '--reasoning-effort', 'high']
+            args += ['--reasoning', 'on']
         if rag_on:
             args += ['--embeddings', '--pooling', 'mean']
         args.extend(ext_flags)
