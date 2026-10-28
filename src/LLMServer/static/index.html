@@ -621,12 +621,35 @@ const $ = id => document.getElementById(id);
 
 
 function copyApiKey() {
-  if (window.currentApiKey) {
-    navigator.clipboard.writeText(window.currentApiKey);
-    toast('API Key copied to clipboard!');
-  } else {
+  const key = window.currentApiKey;
+  if (!key) {
     toast('API Key not loaded yet');
+    return;
   }
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(key).then(() => {
+      toast('API Key copied to clipboard!');
+    }).catch(() => fallbackCopy(key));
+  } else {
+    fallbackCopy(key);
+  }
+}
+
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try {
+    document.execCommand('copy');
+    toast('API Key copied to clipboard!');
+  } catch (err) {
+    prompt('Copy API Key:', text);
+  }
+  document.body.removeChild(ta);
 }
 
 function toast(msg) {
