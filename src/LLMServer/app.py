@@ -343,17 +343,43 @@ def index():
     return (ROOT / 'static' / 'index.html').read_text(encoding='utf-8')
 
 
+_status_cache = {'health': None, 'system': {'gpu': {'available': False}, 'ram': {}}}
+_status_cache_lock = threading.Lock()
+
+
+def _status_poller(interval=3.0):
+    """Refreshes slow probes off the request path so /api/status never blocks on llama-server or nvidia-smi."""
+    while True:
+        try:
+            health = server_health()
+            system = system_status()
+            with _status_cache_lock:
+                _status_cache['health'] = health
+                _status_cache['system'] = system
+        except Exception:
+            pass
+        time.sleep(interval)
+
+
+threading.Thread(target=_status_poller, daemon=True, name='status-poller').start()
+
+
 @app.get('/api/status')
 def status():
     with lock:
         running = alive()
-        return {
-            'managed_running': running,
-            'managed_pid': proc.pid if running else None,
-            'active': runtime_state.get('active') if running else None,
-            'health': server_health(),
-            **system_status(),
-        }
+        managed_pid = proc.pid if running else None
+        active = runtime_state.get('active') if running else None
+    with _status_cache_lock:
+        health = _status_cache['health']
+        system = dict(_status_cache['system'])
+    return {
+        'managed_running': running,
+        'managed_pid': managed_pid,
+        'active': active,
+        'health': health,
+        **system,
+    }
 
 
 @app.get('/api/hardware')
