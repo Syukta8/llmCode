@@ -1,4 +1,4 @@
-import json, os, re, secrets, subprocess, threading, time, urllib.request, urllib.parse, urllib.error, shutil, signal, uuid
+import json, os, re, secrets, struct, subprocess, threading, time, urllib.request, urllib.parse, urllib.error, shutil, signal, uuid
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -18,6 +18,7 @@ from src.common.paths import (
     CONFIG_DIR as STORE,
     CONFIG_FILE,
     DAEMON_LOG_FILE,
+    DEPLOY_STATE_FILE,
     HARDWARE_FILE,
     MODEL_DIR,
     LOG_FILE,
@@ -487,6 +488,82 @@ def models():
     return {'models': found, 'directory': str(MODEL_DIR)}
 
 
+def get_gguf_architecture(model_path: Path) -> str:
+    """
+    Extracts general.architecture string from GGUF binary header without external deps.
+    Fast, stream-based seek avoids loading model weights into memory.
+    """
+    try:
+        p = Path(model_path)
+        if not p.is_file() or p.stat().st_size < 32:
+            return ''
+        with open(p, 'rb') as f:
+            if f.read(4) != b'GGUF':
+                return ''
+            version = struct.unpack('<I', f.read(4))[0]
+            if version not in (2, 3):
+                return ''
+            _tensor_count = struct.unpack('<Q', f.read(8))[0]
+            kv_count = struct.unpack('<Q', f.read(8))[0]
+            for _ in range(min(kv_count, 128)):
+                klen_bytes = f.read(8)
+                if len(klen_bytes) < 8:
+                    break
+                klen = struct.unpack('<Q', klen_bytes)[0]
+                if klen > 1024:
+                    break
+                key = f.read(klen).decode('utf-8', errors='ignore')
+                vtype_bytes = f.read(4)
+                if len(vtype_bytes) < 4:
+                    break
+                vtype = struct.unpack('<I', vtype_bytes)[0]
+                if key == 'general.architecture':
+                    if vtype == 8:
+                        slen_bytes = f.read(8)
+                        if len(slen_bytes) == 8:
+                            slen = struct.unpack('<Q', slen_bytes)[0]
+                            return f.read(slen).decode('utf-8', errors='ignore')
+                    break
+                if vtype in (0, 1):
+                    f.seek(1, os.SEEK_CUR)
+                elif vtype in (2, 3):
+                    f.seek(2, os.SEEK_CUR)
+                elif vtype in (4, 5, 10):
+                    f.seek(4, os.SEEK_CUR)
+                elif vtype in (6, 7, 11):
+                    f.seek(8, os.SEEK_CUR)
+                elif vtype == 8:
+                    slen_b = f.read(8)
+                    if len(slen_b) < 8:
+                        break
+                    slen = struct.unpack('<Q', slen_b)[0]
+                    f.seek(slen, os.SEEK_CUR)
+                elif vtype == 9:
+                    atype_b = f.read(4)
+                    alen_b = f.read(8)
+                    if len(atype_b) < 4 or len(alen_b) < 8:
+                        break
+                    atype = struct.unpack('<I', atype_b)[0]
+                    alen = struct.unpack('<Q', alen_b)[0]
+                    sz = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 8, 7: 8, 10: 4, 11: 8}.get(atype)
+                    if sz:
+                        f.seek(sz * alen, os.SEEK_CUR)
+                    elif atype == 8:
+                        for _ in range(alen):
+                            slen_b = f.read(8)
+                            if len(slen_b) < 8:
+                                break
+                            slen = struct.unpack('<Q', slen_b)[0]
+                            f.seek(slen, os.SEEK_CUR)
+                    else:
+                        break
+                else:
+                    break
+    except Exception:
+        pass
+    return ''
+
+
 def build_context_extension_flags(backend: str, preset: str) -> list:
     """
     Translates Context Extension preset ('none', 'linear_2x', 'yarn_2x', 'yarn_4x', 'yarn_8x')
@@ -624,6 +701,10 @@ def launch_backend_process(backend, path, params):
         if rag_on:
             args += ['--embeddings', '--pooling', 'mean']
         args.extend(ext_flags)
+        if params.context > 0 and not any('--override-kv' in a for a in custom_args):
+            arch = get_gguf_architecture(path)
+            if arch:
+                args.extend(['--override-kv', f'{arch}.context_length=int:{params.context}'])
         args.extend(custom_args)
 
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -939,11 +1020,17 @@ def ensure_git_ignored(project_dir: Path, filename: str = 'opencode.json') -> No
                 pass
 
 
-def write_opencode_config(project_dir: Path, alias: str, port: int, rag_context_file: Optional[Path] = None) -> Path:
+def write_opencode_config(
+    project_dir: Path,
+    alias: str,
+    port: int,
+    rag_context_file: Optional[Path] = None,
+    context_limit: Optional[int] = None,
+) -> Path:
     """
     Writes or updates opencode.json in the target project directory so OpenCode CLI
     connects directly to the local backend API using standard alias and file-referenced API key,
-    with reasoning enabled.
+    with reasoning enabled and explicit context window limits.
     """
     cfg_path = project_dir / 'opencode.json'
     data = {}
@@ -954,6 +1041,27 @@ def write_opencode_config(project_dir: Path, alias: str, port: int, rag_context_
             data = {}
     data.setdefault('$schema', 'https://opencode.ai/config.json')
     providers = data.setdefault('provider', {})
+
+    # Resolve active context limit
+    ctx = context_limit
+    if not ctx:
+        try:
+            st = json.loads(DEPLOY_STATE_FILE.read_text(encoding='utf-8'))
+            ctx = int(st.get('last_context', 0))
+        except Exception:
+            ctx = 0
+    if not ctx or ctx <= 0:
+        ctx = 262144
+
+    model_entry = {
+        'name': alias,
+        'reasoning': True,
+        'limit': {
+            'context': ctx,
+            'output': 8192,
+        },
+    }
+
     providers['llmcode'] = {
         'npm': '@ai-sdk/openai-compatible',
         'name': f'llmCode ({alias})',
@@ -962,11 +1070,8 @@ def write_opencode_config(project_dir: Path, alias: str, port: int, rag_context_
             'apiKey': f'{{file:{API_KEY_FILE.as_posix()}}}',
         },
         'models': {
-            alias: {
-                'name': alias,
-                'reasoning': True,
-            }
-        }
+            alias: model_entry,
+        },
     }
     data['model'] = f'llmcode/{alias}'
     data['default_agent'] = 'build'
@@ -1045,7 +1150,7 @@ def launch_opencode(params: OpenCodeLaunch):
         index_workspace(project)
         rag_file = RAG_CONTEXT_FILE
 
-    write_opencode_config(project, params.alias, PORT, rag_context_file=rag_file)
+    write_opencode_config(project, params.alias, PORT, rag_context_file=rag_file, context_limit=params.context)
 
     cfg = sync_config()
     oc_bin = cfg.get('agents', {}).get('opencode') or 'npx opencode-ai'

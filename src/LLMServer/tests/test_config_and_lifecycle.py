@@ -38,6 +38,7 @@ from src.common.rag import (
 from src.LLMServer.app import (
     Deploy,
     build_context_extension_flags,
+    get_gguf_architecture,
     write_opencode_config,
 )
 
@@ -206,6 +207,39 @@ class TestConfigAndLifecycle(unittest.TestCase):
             oc_file = write_opencode_config(ws, 'llamacpp', 8080, rag_context_file=out_md)
             oc_data = json.loads(oc_file.read_text(encoding='utf-8'))
             self.assertIn(str(out_md.resolve()), oc_data.get('instructions', []))
+
+    def test_opencode_config_context_limit(self):
+        """Verifies write_opencode_config writes explicit context and output limits."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp) / 'project'
+            ws.mkdir()
+            oc_file = write_opencode_config(ws, 'llamacpp', 8080, context_limit=524288)
+            oc_data = json.loads(oc_file.read_text(encoding='utf-8'))
+            model_info = oc_data['provider']['llmcode']['models']['llamacpp']
+            self.assertIn('limit', model_info)
+            self.assertEqual(model_info['limit']['context'], 524288)
+            self.assertEqual(model_info['limit']['output'], 8192)
+
+    def test_get_gguf_architecture_detection(self):
+        """Verifies GGUF architecture header parsing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_gguf = Path(tmp) / 'model.gguf'
+            import struct
+            # Minimal GGUF v3 header with general.architecture = 'qwen2'
+            arch_key = b'general.architecture'
+            arch_val = b'qwen2'
+            header = (
+                b'GGUF' +
+                struct.pack('<I', 3) +       # version
+                struct.pack('<Q', 0) +       # tensor_count
+                struct.pack('<Q', 1) +       # kv_count = 1
+                struct.pack('<Q', len(arch_key)) + arch_key +
+                struct.pack('<I', 8) +       # string type
+                struct.pack('<Q', len(arch_val)) + arch_val
+            )
+            fake_gguf.write_bytes(header)
+            self.assertEqual(get_gguf_architecture(fake_gguf), 'qwen2')
+            self.assertEqual(get_gguf_architecture(Path(tmp) / 'nonexistent.gguf'), '')
 
 
 if __name__ == '__main__':
