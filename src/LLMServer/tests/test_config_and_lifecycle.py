@@ -219,6 +219,9 @@ class TestConfigAndLifecycle(unittest.TestCase):
             self.assertIn('limit', model_info)
             self.assertEqual(model_info['limit']['context'], 524288)
             self.assertEqual(model_info['limit']['output'], 8192)
+            self.assertIn('variants', model_info)
+            self.assertEqual(model_info['variants']['high']['reasoningEffort'], 'xhigh')
+            self.assertEqual(model_info['variants']['medium']['reasoningEffort'], 'medium')
 
     def test_get_gguf_architecture_detection(self):
         """Verifies GGUF architecture header parsing."""

@@ -1060,6 +1060,12 @@ def write_opencode_config(
             'context': ctx,
             'output': 8192,
         },
+        'variants': {
+            'high': {'reasoningEffort': 'xhigh'},
+            'medium': {'reasoningEffort': 'medium'},
+            'low': {'reasoningEffort': 'low'},
+            'xhigh': {'reasoningEffort': 'xhigh'},
+        },
     }
 
     providers['llmcode'] = {
