@@ -9,6 +9,8 @@ setlocal enabledelayedexpansion
 set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
+set "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1"
+
 set "VENV_PY=%SCRIPT_DIR%src\LLMServer\.venv\Scripts\python.exe"
 
 if not exist "%VENV_PY%" (

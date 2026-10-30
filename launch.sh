@@ -9,6 +9,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+export OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1
+
 VENV_PY="$SCRIPT_DIR/src/LLMServer/.venv/bin/python3"
 
 # Run setup automatically if virtual environment is missing or broken

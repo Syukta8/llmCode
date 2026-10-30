@@ -125,7 +125,7 @@ def rotate_api_key() -> str:
     global _current_api_key, _key_rotated_at
     key = f"sk-{secrets.token_urlsafe(32)}"
     write_secret(API_KEY_FILE, key)
-    agent_env_content = f"OPENAI_API_KEY={key}\nOPENAI_API_BASE=http://127.0.0.1:{PORT}/v1\n"
+    agent_env_content = f"OPENAI_API_KEY={key}\nOPENAI_API_BASE=http://127.0.0.1:{PORT}/v1\nOPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1\n"
     write_secret(AGENT_ENV_FILE, agent_env_content)
     _current_api_key = key
     _key_rotated_at = datetime.now().isoformat(timespec='seconds')
@@ -1166,6 +1166,7 @@ def launch_opencode(params: OpenCodeLaunch):
             oc_cmd += f' --session {params.session_id.strip()}'
         else:
             oc_cmd += ' --continue'
+    os.environ['OPENCODE_DISABLE_CLAUDE_CODE_SKILLS'] = '1'
     opencode_proc = spawn_in_terminal(oc_cmd, cwd=project, title="OpenCode CLI")
     return {
         'ok': True,

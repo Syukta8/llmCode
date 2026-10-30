@@ -989,6 +989,21 @@ def install_cli_agents(venv_python: str, non_interactive: bool = False):
     if choice in ('1', '3'):
         print("\nInstalling OpenCode CLI into llm-dash .venv...")
         _install_opencode_into_venv(venv_dir)
+        setup_opencode_orchestrator()
+
+
+def setup_opencode_orchestrator():
+    """Ensures antigravity-skill-orchestrator skill is present in ~/.config/opencode/skills."""
+    src_skill = REPO_ROOT / 'src' / 'common' / 'skills' / 'antigravity-skill-orchestrator' / 'SKILL.md'
+    if not src_skill.is_file():
+        return
+    dest_dir = Path.home() / '.config' / 'opencode' / 'skills' / 'antigravity-skill-orchestrator'
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_skill = dest_dir / 'SKILL.md'
+    try:
+        shutil.copy2(src_skill, dest_skill)
+    except Exception:
+        pass
 
 
 # ==============================================================================
@@ -1266,6 +1281,9 @@ def main(non_interactive: bool = False, uninstall: bool = False):
 
     # 6. Offer to configure VS Code Continue if ~/.continue/config.yaml or config.json exists
     setup_continue_config(non_interactive=non_interactive)
+
+    # 6.5. Deploy OpenCode orchestrator skill
+    setup_opencode_orchestrator()
 
     # 7. Render desktop entry template with absolute paths
     render_desktop_entry()
