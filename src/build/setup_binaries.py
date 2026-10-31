@@ -983,7 +983,7 @@ def install_cli_agents(venv_python: str, non_interactive: bool = False):
     if choice in ('1', '2'):
         print("\nInstalling Aider CLI (aider-chat) into llm-dash .venv...")
         try:
-            subprocess.run([venv_python, '-m', 'pip', 'install', '-q', 'aider-chat'], check=True)
+            subprocess.run([venv_python, '-m', 'pip', 'install', '-q', '--no-warn-script-location', 'aider-chat'], check=True)
             print("Aider installed successfully in llm-dash .venv.")
         except Exception as e:
             print(f"Warning: Aider pip install encountered an issue: {e}")

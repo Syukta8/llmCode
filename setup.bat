@@ -42,20 +42,37 @@ if %errorlevel% neq 0 (
 if not exist "%VENV_PY%" (
     echo Creating virtual environment at %VENV_DIR%...
     python -m venv "%VENV_DIR%"
+    if !errorlevel! neq 0 (
+        echo [ERROR] Failed to create Python virtual environment at %VENV_DIR%.
+        exit /b !errorlevel!
+    )
 )
 
 if "%IS_FULL%"=="0" if exist "%SCRIPT_DIR%config\deploy_state.json" (
     echo Existing deployment detected. Running incremental update check...
     "%VENV_PY%" "%SCRIPT_DIR%llmcode.py" check-update %*
-    exit /b %errorlevel%
+    exit /b !errorlevel!
 )
 
 echo Installing core dashboard dependencies...
-"%VENV_PY%" -m pip install --upgrade pip -q
-"%VENV_PY%" -m pip install -q -r "%SCRIPT_DIR%src\LLMServer\requirements.txt"
+"%VENV_PY%" -m pip install --upgrade pip -q --no-warn-script-location
+if !errorlevel! neq 0 (
+    echo [ERROR] Failed to upgrade pip in virtual environment.
+    exit /b !errorlevel!
+)
+
+"%VENV_PY%" -m pip install -q --no-warn-script-location -r "%SCRIPT_DIR%src\LLMServer\requirements.txt"
+if !errorlevel! neq 0 (
+    echo [ERROR] Failed to install core dashboard dependencies.
+    exit /b !errorlevel!
+)
 
 echo Running hardware scanner, backend engine setup, and CLI agent installer...
 "%VENV_PY%" "%SCRIPT_DIR%llmcode.py" setup %*
+if !errorlevel! neq 0 (
+    echo [ERROR] llmCode setup failed.
+    exit /b !errorlevel!
+)
 
 echo.
 echo === llmCode Setup Complete ===

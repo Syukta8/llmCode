@@ -39,6 +39,28 @@ from src.common.process import (
 )
 
 
+def sanitize_system_path() -> None:
+    """
+    Filters out inaccessible, non-existent, or untrusted mount/junction points
+    from os.environ['PATH'] to prevent OSError [WinError 448] on Windows.
+    """
+    raw_path = os.environ.get("PATH", "")
+    if not raw_path:
+        return
+    valid_parts = []
+    for part in raw_path.split(os.pathsep):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            p = Path(part)
+            if p.is_dir():
+                valid_parts.append(part)
+        except OSError:
+            continue
+    os.environ["PATH"] = os.pathsep.join(valid_parts)
+
+
 def get_python_exe() -> str:
     """Returns path to virtualenv python if available, else sys.executable."""
     venv_dir = REPO_ROOT / 'src' / 'LLMServer' / '.venv'
@@ -99,8 +121,8 @@ def cmd_setup(args):
 
     py_exe = get_python_exe()
     print("Installing dashboard requirements...")
-    subprocess.run([py_exe, '-m', 'pip', 'install', '--upgrade', 'pip', '-q'], check=True)
-    subprocess.run([py_exe, '-m', 'pip', 'install', '-q', '-r', str(server_dir / 'requirements.txt')], check=True)
+    subprocess.run([py_exe, '-m', 'pip', 'install', '--upgrade', 'pip', '-q', '--no-warn-script-location'], check=True)
+    subprocess.run([py_exe, '-m', 'pip', 'install', '-q', '--no-warn-script-location', '-r', str(server_dir / 'requirements.txt')], check=True)
 
     from src.build.setup_binaries import main as run_binary_setup
     run_binary_setup(non_interactive=getattr(args, 'non_interactive', False))
@@ -151,7 +173,7 @@ def cmd_check_update(args):
 
     if 'pip' in steps:
         print("\n[Step: pip] Updating dashboard requirements...")
-        subprocess.run([py_exe, '-m', 'pip', 'install', '-q', '-r', str(server_dir / 'requirements.txt')], check=True)
+        subprocess.run([py_exe, '-m', 'pip', 'install', '-q', '--no-warn-script-location', '-r', str(server_dir / 'requirements.txt')], check=True)
 
     if 'config_sync' in steps:
         print("\n[Step: config_sync] Synchronizing configuration database and paths...")
@@ -403,6 +425,7 @@ def cmd_aider(args):
 
 
 def main():
+    sanitize_system_path()
     parser = argparse.ArgumentParser(description="llmCode - Cross-Platform Local LLM Runner")
     subparsers = parser.add_subparsers(dest="command", required=True)
 

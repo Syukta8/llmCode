@@ -89,8 +89,8 @@ fi
 
 # 3. Install core dashboard requirements
 echo "Installing core dashboard dependencies..."
-"$VENV_PIP" install --upgrade pip -q
-"$VENV_PIP" install -q -r "$SCRIPT_DIR/src/LLMServer/requirements.txt"
+"$VENV_PIP" install --upgrade pip -q --no-warn-script-location
+"$VENV_PIP" install -q --no-warn-script-location -r "$SCRIPT_DIR/src/LLMServer/requirements.txt"
 
 # 4. Run hardware scan, engine compiler/downloader, venv CLI agents & Continue setup
 "$VENV_PY" "$SCRIPT_DIR/llmcode.py" setup "$@"
