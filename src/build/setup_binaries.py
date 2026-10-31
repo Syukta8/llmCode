@@ -244,6 +244,7 @@ def scan_and_save_hardware() -> Dict[str, Any]:
     # Auto-tune runtime settings based on detected VRAM / RAM & CPU cores
     vram_mb = gpu.get('vram_mb', 0)
     opt_threads = max(2, min(32, cpu_cores // 2 if cpu_cores >= 8 else max(2, cpu_cores - 1)))
+    opt_threads_batch = max(opt_threads, min(64, cpu_cores - 2 if cpu_cores >= 8 else cpu_cores))
 
     if gpu['available']:
         if vram_mb >= 20000:      # 24GB+ (e.g. RTX 3090/4090/5090 or 32GB+ Mac)
@@ -316,6 +317,7 @@ def scan_and_save_hardware() -> Dict[str, Any]:
             'layers': opt_layers,
             'context': opt_context,
             'threads': opt_threads,
+            'threads_batch': opt_threads_batch,
             'batch': opt_batch,
             'ubatch': opt_ubatch,
             'flash_attn': opt_flash_attn,

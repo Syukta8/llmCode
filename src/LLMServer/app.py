@@ -209,6 +209,7 @@ class Deploy(BaseModel):
     layers: int = Field(default=8, ge=0, le=999)
     context: int = Field(default=8192, ge=512, le=1048576)
     threads: int = Field(default=4, ge=1, le=256)
+    threads_batch: int = Field(default=6, ge=1, le=256)
     batch: int = Field(default=2048, ge=32, le=65536)
     ubatch: int = Field(default=256, ge=32, le=16384)
     reasoning: bool = True
@@ -250,6 +251,7 @@ class OpenCodeLaunch(BaseModel):
     layers: int = Field(default=8, ge=0, le=999)
     context: int = Field(default=8192, ge=512, le=1048576)
     threads: int = Field(default=4, ge=1, le=256)
+    threads_batch: int = Field(default=6, ge=1, le=256)
     batch: int = Field(default=2048, ge=32, le=65536)
     ubatch: int = Field(default=256, ge=32, le=16384)
     reasoning: bool = True
@@ -278,6 +280,7 @@ class AiderLaunch(BaseModel):
     layers: int = Field(default=8, ge=0, le=999)
     context: int = Field(default=8192, ge=512, le=1048576)
     threads: int = Field(default=4, ge=1, le=256)
+    threads_batch: int = Field(default=6, ge=1, le=256)
     batch: int = Field(default=2048, ge=32, le=65536)
     ubatch: int = Field(default=256, ge=32, le=16384)
     reasoning: bool = True
@@ -680,6 +683,7 @@ def launch_backend_process(backend, path, params):
             '--ctx-size', str(params.context),
             '--n-gpu-layers', str(params.layers),
             '--threads', str(params.threads),
+            '--threads-batch', str(getattr(params, 'threads_batch', params.threads)),
             '-b', str(params.batch),
             '-ub', str(params.ubatch),
             '--temp', str(params.temp),
@@ -749,6 +753,7 @@ def launch_backend_process(backend, path, params):
         'layers': params.layers,
         'context': params.context,
         'threads': params.threads,
+        'threads_batch': getattr(params, 'threads_batch', params.threads),
         'batch': params.batch,
         'ubatch': params.ubatch,
         'flash_attn': params.flash_attn,
@@ -782,6 +787,7 @@ def start(params: Deploy):
             'last_layers': params.layers,
             'last_context': params.context,
             'last_threads': params.threads,
+            'last_threads_batch': params.threads_batch,
             'last_batch': params.batch,
             'last_ubatch': params.ubatch,
             'last_flash_attn': params.flash_attn,
@@ -799,6 +805,7 @@ def start(params: Deploy):
             'last_reasoning': params.reasoning,
             'last_custom_flags': params.custom_flags,
         })
+        write_opencode_config(None, params.alias, PORT, context_limit=params.context)
         return {'ok': True, 'pid': proc.pid, 'command': args, 'message': f'[{params.backend}] launching; health may take time to become ready.'}
 
 
@@ -1020,19 +1027,23 @@ def ensure_git_ignored(project_dir: Path, filename: str = 'opencode.json') -> No
                 pass
 
 
+GLOBAL_OPENCODE_CONFIG = HOME / '.config' / 'opencode' / 'opencode.jsonc'
+
+
 def write_opencode_config(
-    project_dir: Path,
+    project_dir: Optional[Path],
     alias: str,
     port: int,
     rag_context_file: Optional[Path] = None,
     context_limit: Optional[int] = None,
 ) -> Path:
     """
-    Writes or updates opencode.json in the target project directory so OpenCode CLI
-    connects directly to the local backend API using standard alias and file-referenced API key,
-    with reasoning enabled and explicit context window limits.
+    Writes or updates the global OpenCode configuration (~/.config/opencode/opencode.jsonc)
+    so OpenCode CLI connects directly to the local backend API from any directory without
+    polluting project repositories with per-project opencode.json files.
     """
-    cfg_path = project_dir / 'opencode.json'
+    cfg_path = GLOBAL_OPENCODE_CONFIG
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
     data = {}
     if cfg_path.is_file():
         try:
@@ -1051,14 +1062,16 @@ def write_opencode_config(
         except Exception:
             ctx = 0
     if not ctx or ctx <= 0:
-        ctx = 262144
+        ctx = 16384
+
+    out_limit = min(4096, max(1024, ctx // 8))
 
     model_entry = {
         'name': alias,
         'reasoning': True,
         'limit': {
             'context': ctx,
-            'output': 8192,
+            'output': out_limit,
         },
         'variants': {
             'high': {'reasoningEffort': 'xhigh'},
@@ -1074,6 +1087,7 @@ def write_opencode_config(
         'options': {
             'baseURL': f'http://127.0.0.1:{port}/v1',
             'apiKey': f'{{file:{API_KEY_FILE.as_posix()}}}',
+            'timeout': 600000,
         },
         'models': {
             alias: model_entry,
@@ -1092,10 +1106,24 @@ def write_opencode_config(
         'todowrite': 'allow',
         'question': 'allow'
     }
+    instr_list = []
+    global_instr = HOME / '.config' / 'opencode' / 'instructions.md'
+    if global_instr.is_file():
+        instr_list.append(str(global_instr.resolve()))
     if rag_context_file and rag_context_file.is_file():
-        data['instructions'] = [str(rag_context_file.resolve())]
+        instr_list.append(str(rag_context_file.resolve()))
+    if instr_list:
+        data['instructions'] = instr_list
     cfg_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-    ensure_git_ignored(project_dir, 'opencode.json')
+
+    # Clean up any legacy per-project opencode.json so global config takes precedence everywhere
+    if project_dir and project_dir.is_dir():
+        legacy_proj_cfg = project_dir / 'opencode.json'
+        if legacy_proj_cfg.is_file() and legacy_proj_cfg.resolve() != cfg_path.resolve():
+            try:
+                legacy_proj_cfg.unlink()
+            except Exception:
+                pass
     return cfg_path
 
 
@@ -1132,6 +1160,7 @@ def launch_opencode(params: OpenCodeLaunch):
         'last_layers': params.layers,
         'last_context': params.context,
         'last_threads': params.threads,
+        'last_threads_batch': params.threads_batch,
         'last_batch': params.batch,
         'last_ubatch': params.ubatch,
         'last_flash_attn': params.flash_attn,
@@ -1231,6 +1260,7 @@ def launch_aider(params: AiderLaunch):
         'last_layers': params.layers,
         'last_context': params.context,
         'last_threads': params.threads,
+        'last_threads_batch': params.threads_batch,
         'last_batch': params.batch,
         'last_ubatch': params.ubatch,
         'last_flash_attn': params.flash_attn,

@@ -313,6 +313,7 @@ def _default_config() -> Dict[str, Any]:
             'last_layers': int(rt.get('layers', 8)),
             'last_context': int(rt.get('context', 8192)),
             'last_threads': int(rt.get('threads', 4)),
+            'last_threads_batch': int(rt.get('threads_batch', 6)),
             'last_batch': int(rt.get('batch', 2048)),
             'last_ubatch': int(rt.get('ubatch', 256)),
             'last_flash_attn': str(rt.get('flash_attn', 'on')),
@@ -425,6 +426,7 @@ def sync_config(apply_hardware_defaults: bool = False) -> Dict[str, Any]:
             cfg['settings']['last_layers'] = int(rt.get('layers', cfg['settings'].get('last_layers', 8)))
             cfg['settings']['last_context'] = int(rt.get('context', cfg['settings'].get('last_context', 8192)))
             cfg['settings']['last_threads'] = int(rt.get('threads', cfg['settings'].get('last_threads', 4)))
+            cfg['settings']['last_threads_batch'] = int(rt.get('threads_batch', cfg['settings'].get('last_threads_batch', 6)))
             cfg['settings']['last_batch'] = int(rt.get('batch', cfg['settings'].get('last_batch', 2048)))
             cfg['settings']['last_ubatch'] = int(rt.get('ubatch', cfg['settings'].get('last_ubatch', 256)))
             cfg['settings']['last_flash_attn'] = str(rt.get('flash_attn', cfg['settings'].get('last_flash_attn', 'on')))

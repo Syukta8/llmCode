@@ -425,6 +425,10 @@
       <div class="content">
         <div class="form-grid">
           <div class="field">
+            <label>Batch Threads (--threads-batch)</label>
+            <input id="threads_batch" type="number" min="1" max="256" value="6">
+          </div>
+          <div class="field">
             <label>Prompt Batch Size (-b)</label>
             <input id="batch" type="number" min="32" max="16384" step="128" value="2048">
           </div>
@@ -882,6 +886,7 @@ function getDeployPayload() {
     layers: +$('layers').value,
     context: +$('context').value,
     threads: +$('threads').value,
+    threads_batch: +$('threads_batch').value,
     batch: +$('batch').value,
     ubatch: +$('ubatch').value,
     flash_attn: $('flashAttn').value,
@@ -1151,6 +1156,7 @@ async function init() {
     if (s.last_layers) $('layers').value = s.last_layers;
     if (s.last_context) $('context').value = s.last_context;
     if (s.last_threads) $('threads').value = s.last_threads;
+    if (s.last_threads_batch) $('threads_batch').value = s.last_threads_batch;
     if (s.last_batch) $('batch').value = s.last_batch;
     if (s.last_ubatch) $('ubatch').value = s.last_ubatch;
     if (s.last_flash_attn) $('flashAttn').value = s.last_flash_attn;
