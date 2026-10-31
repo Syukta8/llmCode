@@ -1,5 +1,7 @@
 # llmCode
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Unified local LLM server and coding station supporting **Windows**, **Linux**, and **macOS**.
 Scans your hardware & packages into `config/hardware.json`, auto-tunes `llama.cpp`, `KoboldCpp`, and `Ollama` compilation & settings, installs **Aider** and **OpenCode** inside the `llm-dash` virtual environment, and configures **VS Code Continue** with standard aliases (`llamacpp`, `koboldcpp`, `ollama`).
 
@@ -70,4 +72,25 @@ Running `setup.sh` or `setup.bat` after `git pull` checks `config/deploy_state.j
 - **Engine Source (`setup_binaries.py`)**: Prompts before rebuilding/redownloading.
 - **Server code (`app.py`, `src/common/`)**: Prompts before restarting active background services.
 - Run `python llmcode.py check-update` directly or `./setup.sh --full` to force complete reinstallation.
+
+---
+
+## Security
+
+By default, all services and backends bind strictly to `127.0.0.1` (localhost) with auto-generated session keys stored in `config/api_key` and `config/agent.env`. If exposing across a local network with `--host 0.0.0.0` or `--lan`, ensure you place services behind a firewall or authenticated reverse proxy.
+
+For vulnerability disclosure, please review [SECURITY.md](SECURITY.md).
+
+---
+
+## Contributing
+
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for development workflows, coding guidelines, and testing procedures.
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE) - see the [LICENSE](LICENSE) file for details.
+
 
