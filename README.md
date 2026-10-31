@@ -5,6 +5,13 @@
 Unified local LLM server and coding station supporting **Windows**, **Linux**, and **macOS**.
 Scans your hardware & packages into `config/hardware.json`, auto-tunes `llama.cpp`, `KoboldCpp`, and `Ollama` compilation & settings, installs **Aider** and **OpenCode** inside the `llm-dash` virtual environment, and configures **VS Code Continue** with standard aliases (`llamacpp`, `koboldcpp`, `ollama`).
 
+<p align="center">
+  <img src="assets/demo.gif" alt="llmCode Demo" width="100%" />
+</p>
+<p align="center">
+  <em>Local LLM station: auto-hardware scan, auto-tuned compilation, and instant Aider / OpenCode agent integration. (<a href="assets/demo.mp4">Download 1080p MP4</a>)</em>
+</p>
+
 ---
 
 ## 1. Windows Setup & Usage
