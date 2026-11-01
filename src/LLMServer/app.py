@@ -1114,6 +1114,35 @@ def write_opencode_config(
         instr_list.append(str(rag_context_file.resolve()))
     if instr_list:
         data['instructions'] = instr_list
+
+    # Ensure standard MCP servers for coding, research, and automation are pre-configured (disabled by default)
+    mcp_servers = data.setdefault('mcp', {})
+    default_mcps = {
+        'fetch': {
+            'type': 'local',
+            'enabled': False,
+            'command': ['uvx', 'mcp-server-fetch'],
+        },
+        'context7': {
+            'type': 'local',
+            'enabled': False,
+            'command': ['npx', '-y', '@upstash/context7-mcp'],
+        },
+        'sequential-thinking': {
+            'type': 'local',
+            'enabled': False,
+            'command': ['npx', '-y', '@modelcontextprotocol/server-sequential-thinking'],
+        },
+        'playwright': {
+            'type': 'local',
+            'enabled': False,
+            'command': ['npx', '-y', '@playwright/mcp@latest'],
+        },
+    }
+    for mcp_name, mcp_cfg in default_mcps.items():
+        if mcp_name not in mcp_servers:
+            mcp_servers[mcp_name] = mcp_cfg
+
     cfg_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
 
     # Clean up any legacy per-project opencode.json so global config takes precedence everywhere

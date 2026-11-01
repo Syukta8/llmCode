@@ -33,6 +33,9 @@ models/
 *.exe
 
 # User-specific & local untracked files
+tests/
+test/
+src/LLMServer/tests/
 bin/llmCode.desktop
 MEMORY.md
 MISTAKES.md
