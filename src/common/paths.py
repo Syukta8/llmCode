@@ -391,11 +391,15 @@ def sync_config(apply_hardware_defaults: bool = False) -> Dict[str, Any]:
         }
 
         def _resolve_or_discover(stored_path: str, discover_fn) -> Path:
+            disc = discover_fn()
+            # If discovery found an active binary compiled from source in src/, prioritize it over prebuilt bin/
+            if disc and disc.is_file() and 'src' in disc.parts:
+                return disc
             if stored_path and old_root == str(REPO_ROOT):
                 p = Path(stored_path)
                 if p.is_file():
                     return p.resolve()
-            return discover_fn()
+            return disc
 
         llama_bin = _resolve_or_discover(cfg['binaries'].get('llama_cpp', ''), _discover_llama_server)
         kobold_bin = _resolve_or_discover(cfg['binaries'].get('koboldcpp', ''), _discover_koboldcpp)

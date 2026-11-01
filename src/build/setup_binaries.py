@@ -57,14 +57,30 @@ def _prompt_choice(prompt_text: str, valid_choices: List[str], default: str, non
         print(f"Please enter one of: {', '.join(valid_choices)}")
 
 
-def find_windows_msvc() -> Optional[str]:
-    """Locates vcvars64.bat on Windows via vswhere.exe if cl.exe is not already in PATH."""
+def find_windows_msvc(prefer_cuda_compat: bool = True) -> Optional[str]:
+    """Locates vcvars64.bat on Windows via vswhere.exe.
+    When prefer_cuda_compat is True, searches for Visual Studio 2022 (version [17.0,18.0))
+    first, then Visual Studio 2019 (version [16.0,17.0)), to ensure compatibility with
+    NVIDIA CUDA host compiler requirements before falling back to -latest.
+    """
     if os.name != 'nt':
         return None
-    if shutil.which('cl.exe') or shutil.which('cl'):
-        return 'PATH'
     vswhere = Path(os.environ.get('ProgramFiles(x86)', 'C:/Program Files (x86)')) / 'Microsoft Visual Studio/Installer/vswhere.exe'
     if vswhere.is_file():
+        if prefer_cuda_compat:
+            for ver_range in ('[17.0,18.0)', '[16.0,17.0)'):
+                try:
+                    res = subprocess.run(
+                        [str(vswhere), '-version', ver_range, '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath'],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    install_dir = res.stdout.strip()
+                    if install_dir:
+                        vcvars = Path(install_dir) / 'VC' / 'Auxiliary' / 'Build' / 'vcvars64.bat'
+                        if vcvars.is_file():
+                            return str(vcvars)
+                except Exception:
+                    pass
         try:
             res = subprocess.run(
                 [str(vswhere), '-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath'],
@@ -77,6 +93,8 @@ def find_windows_msvc() -> Optional[str]:
                     return str(vcvars)
         except Exception:
             pass
+    if shutil.which('cl.exe') or shutil.which('cl'):
+        return 'PATH'
     return None
 
 
@@ -605,6 +623,10 @@ def compile_llama_cpp(accel: str) -> bool:
     build_subdir = 'build-cuda' if use_cuda else ('build-metal' if use_metal else 'build')
     build_dir = src_dir / build_subdir
 
+    target_bin = build_dir / 'bin' / get_executable_name('llama-server')
+    if not target_bin.is_file() and (build_dir / 'CMakeCache.txt').is_file():
+        shutil.rmtree(build_dir, ignore_errors=True)
+
     cmake_args = ['cmake', '-S', str(src_dir), '-B', str(build_dir)]
     if shutil.which('ninja'):
         cmake_args.extend(['-G', 'Ninja'])
@@ -643,40 +665,53 @@ def download_prebuilt_llama_cpp(accel: str) -> bool:
 
     api_url = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
     req = urllib.request.Request(api_url, headers={'User-Agent': 'llmCode-Installer/1.0'})
+    release_data = {}
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
             release_data = json.loads(r.read())
     except Exception as e:
-        print(f"Failed to query llama.cpp GitHub release: {e}")
-        return False
+        print(f"Warning: Could not query llama.cpp GitHub API: {e}")
 
     assets = release_data.get('assets', [])
     target_asset = None
 
     for asset in assets:
         name = asset.get('name', '').lower()
-        if plat == 'windows' and 'bin-win' in name and 'x64' in name:
-            if accel == 'cuda' and ('cuda' in name or 'cu12' in name):
+        if plat == 'windows' and ('bin-win' in name or '-win' in name) and ('x64' in name or 'amd64' in name):
+            if accel == 'cuda' and ('cuda' in name or 'cu12' in name or 'cu11' in name):
                 target_asset = asset
                 break
-            elif accel != 'cuda' and 'avx2' in name:
+            elif accel != 'cuda' and ('avx2' in name or 'vulkan' in name or 'x64' in name):
                 target_asset = asset
                 break
-        elif plat == 'macos' and 'bin-macos' in name:
+        elif plat == 'macos' and ('bin-macos' in name or '-macos' in name or '-darwin' in name):
             arch = 'arm64' if platform.machine().lower() in ('arm64', 'aarch64') else 'x64'
             if arch in name:
                 target_asset = asset
                 break
-        elif plat == 'linux' and ('bin-ubuntu' in name or 'bin-linux' in name) and 'x64' in name:
+        elif plat == 'linux' and ('bin-ubuntu' in name or 'bin-linux' in name or '-linux' in name) and ('x64' in name or 'amd64' in name):
             target_asset = asset
             break
 
     if not target_asset:
-        print(f"No matching prebuilt llama.cpp archive found for {plat}.")
-        return False
+        # Fallback to direct well-known GitHub release artifact URLs
+        if plat == 'windows':
+            asset_name = 'llama-b4850-bin-win-cuda-cu12.4-x64.zip' if accel == 'cuda' else 'llama-b4850-bin-win-avx2-x64.zip'
+        elif plat == 'macos':
+            asset_name = 'llama-b4850-bin-macos-arm64.zip' if platform.machine().lower() in ('arm64', 'aarch64') else 'llama-b4850-bin-macos-x64.zip'
+        else:
+            asset_name = 'llama-b4850-bin-ubuntu-x64.zip'
+        target_asset = {
+            'name': asset_name,
+            'browser_download_url': f"https://github.com/ggml-org/llama.cpp/releases/latest/download/{asset_name}"
+        }
 
     archive_path = dest_dir / target_asset['name']
-    download_file(target_asset['browser_download_url'], archive_path)
+    try:
+        download_file(target_asset['browser_download_url'], archive_path)
+    except Exception as e:
+        print(f"Failed to download prebuilt llama.cpp ({target_asset['browser_download_url']}): {e}")
+        return False
 
     if archive_path.name.endswith('.zip'):
         with zipfile.ZipFile(archive_path, 'r') as zf:
@@ -710,10 +745,30 @@ def compile_koboldcpp(accel: str) -> bool:
 
     plat = get_platform_name()
     if plat == 'windows':
-        cmake_args = ['cmake', '-S', str(src_dir), '-B', str(src_dir / 'build'), '-DCMAKE_BUILD_TYPE=Release']
+        build_dir = src_dir / 'build'
+        if (build_dir / 'CMakeCache.txt').is_file():
+            shutil.rmtree(build_dir, ignore_errors=True)
+
+        cmake_args = ['cmake', '-S', str(src_dir), '-B', str(build_dir), '-DCMAKE_BUILD_TYPE=Release']
+        if shutil.which('ninja'):
+            cmake_args.extend(['-G', 'Ninja'])
+        if accel == 'cuda':
+            cmake_args.append('-DLLAMA_CUBLAS=ON')
+
+        jobs = str(hw.get('build_config', {}).get('parallel_jobs', 4))
+        build_cmd = ['cmake', '--build', str(build_dir), '--config', 'Release', '-j', jobs]
+
         try:
-            subprocess.run(cmake_args, check=True)
-            subprocess.run(['cmake', '--build', str(src_dir / 'build'), '--config', 'Release'], check=True)
+            msvc = find_windows_msvc()
+            if msvc and msvc != 'PATH':
+                cfg_line = f'call "{msvc}" && ' + ' '.join(f'"{a}"' if ' ' in a else a for a in cmake_args)
+                bld_line = f'call "{msvc}" && ' + ' '.join(f'"{a}"' if ' ' in a else a for a in build_cmd)
+                subprocess.run(cfg_line, shell=True, check=True)
+                subprocess.run(bld_line, shell=True, check=True)
+            else:
+                subprocess.run(cmake_args, check=True)
+                subprocess.run(build_cmd, check=True)
+            print(f"KoboldCpp compiled successfully in {src_dir}")
             return True
         except Exception as e:
             print(f"Windows KoboldCpp local build note ({e}); downloading official prebuilt binary fallback...")
@@ -983,6 +1038,7 @@ def install_cli_agents(venv_python: str, non_interactive: bool = False):
     if choice in ('1', '2'):
         print("\nInstalling Aider CLI (aider-chat) into llm-dash .venv...")
         try:
+            subprocess.run([venv_python, '-m', 'pip', 'install', '-q', '--no-warn-script-location', 'setuptools', 'wheel'], check=False)
             subprocess.run([venv_python, '-m', 'pip', 'install', '-q', '--no-warn-script-location', 'aider-chat'], check=True)
             print("Aider installed successfully in llm-dash .venv.")
         except Exception as e:
