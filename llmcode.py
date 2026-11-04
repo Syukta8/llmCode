@@ -27,6 +27,7 @@ from src.common.paths import (
     LOG_FILE,
     MODEL_DIR,
     PID_FILE,
+    _discover_opencode,
     build_binary_env,
     get_koboldcpp_binary,
     get_llama_server_binary,
@@ -149,6 +150,15 @@ def cmd_check_update(args):
 
     steps = res['steps']
     changed = res['changed_files']
+
+    # Always verify that OpenCode v2 (>= 2.0.0) is present in .venv even on incremental runs
+    venv_dir = REPO_ROOT / 'src' / 'LLMServer' / '.venv'
+    if not _discover_opencode():
+        from src.build.setup_binaries import _install_opencode_into_venv, setup_opencode_orchestrator
+        print("OpenCode v2 (>= 2.0.0) not detected or legacy v1 present; upgrading to OpenCode v2 in .venv...")
+        _install_opencode_into_venv(venv_dir)
+        setup_opencode_orchestrator()
+        sync_config(apply_hardware_defaults=False)
 
     if not steps:
         print("✓ All deployment components are up to date with repository state.")

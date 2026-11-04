@@ -288,39 +288,49 @@ def parse_version_tuple(version_str: str) -> Tuple[int, int, int]:
 
 
 def _discover_opencode() -> Optional[str]:
-    """Discovers OpenCode v2 (`opencode-ai` >= 1.0 / v2 architecture) CLI executable prioritizing llm-dash venv, rejecting legacy v1 (< 1.0) binaries."""
+    """Discovers OpenCode v2 (`@opencode/cli` >= 2.0.0) CLI executable prioritizing llm-dash venv, rejecting legacy v1 (< 2.0.0) binaries."""
     exe = get_executable_name('opencode')
     venv_dir = SRC_DIR / 'LLMServer' / '.venv'
     venv_bin_dir = venv_dir / ('Scripts' if os.name == 'nt' else 'bin')
     candidates = [
         venv_bin_dir / exe,
+        venv_bin_dir / 'opencode2',
         venv_bin_dir / 'opencode.cmd',
+        venv_bin_dir / 'opencode2.cmd',
+        venv_dir / 'node_modules' / '@opencode' / 'cli' / 'bin' / 'opencode.exe',
+        venv_dir / 'node_modules' / '@opencode' / 'cli' / 'bin' / exe,
         venv_dir / 'node_modules' / '.bin' / ('opencode.cmd' if os.name == 'nt' else 'opencode'),
-        venv_dir / 'node_modules' / 'opencode-ai' / 'bin' / 'opencode.exe',
-        venv_dir / 'node_modules' / 'opencode-ai' / 'bin' / exe,
         Path.home() / '.local' / 'bin' / exe,
     ]
     for c in candidates:
         if c.is_file():
             try:
-                res = subprocess.run([str(c.resolve()), '--version'], capture_output=True, text=True, timeout=3)
+                cmd_target = str(c.resolve())
+                if os.name == 'nt' and cmd_target.lower().endswith(('.cmd', '.bat')):
+                    res = subprocess.run(['cmd.exe', '/c', cmd_target, '--version'], capture_output=True, text=True, timeout=3)
+                else:
+                    res = subprocess.run([cmd_target, '--version'], capture_output=True, text=True, timeout=3)
                 if res.returncode == 0:
                     ver_out = (res.stdout or '') + (res.stderr or '')
                     ver = parse_version_tuple(ver_out)
-                    # Reject legacy v1 (0.x) sst/opencode binaries; require v2 architecture (1.0+)
-                    if ver >= (1, 0, 0) or ver == (0, 0, 0):
-                        return str(c.resolve())
+                    # Reject legacy v1 (0.x / 1.x opencode-ai) binaries; require v2 architecture (2.0.0+)
+                    if ver >= (2, 0, 0):
+                        return cmd_target
             except Exception:
                 pass
     found = shutil.which('opencode2') or shutil.which('opencode')
     if found:
         try:
-            res = subprocess.run([str(Path(found).resolve()), '--version'], capture_output=True, text=True, timeout=3)
+            cmd_target = str(Path(found).resolve())
+            if os.name == 'nt' and cmd_target.lower().endswith(('.cmd', '.bat')):
+                res = subprocess.run(['cmd.exe', '/c', cmd_target, '--version'], capture_output=True, text=True, timeout=3)
+            else:
+                res = subprocess.run([cmd_target, '--version'], capture_output=True, text=True, timeout=3)
             if res.returncode == 0:
                 ver_out = (res.stdout or '') + (res.stderr or '')
                 ver = parse_version_tuple(ver_out)
-                if ver >= (1, 0, 0) or ver == (0, 0, 0):
-                    return str(Path(found).resolve())
+                if ver >= (2, 0, 0):
+                    return cmd_target
         except Exception:
             pass
     return None

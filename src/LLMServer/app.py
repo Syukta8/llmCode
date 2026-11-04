@@ -1395,7 +1395,7 @@ def launch_opencode(params: OpenCodeLaunch):
     write_opencode_config(project, params.alias, PORT, rag_context_file=rag_file, context_limit=params.context)
 
     cfg = sync_config()
-    oc_bin = cfg.get('agents', {}).get('opencode') or 'npx opencode-ai@latest'
+    oc_bin = cfg.get('agents', {}).get('opencode') or 'npx @opencode/cli@latest'
     oc_cmd = (f'"{oc_bin}"' if ' ' in str(oc_bin) and not str(oc_bin).startswith('npx ') else f'{oc_bin}') + ' --auto'
     if params.restore_history:
         if params.session_id.strip():

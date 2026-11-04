@@ -1168,7 +1168,11 @@ def download_prebuilt_ollama() -> bool:
 def is_binary_runnable(bin_path: Path, min_version: Tuple[int, int, int] = (0, 0, 0)) -> bool:
     """Verifies that an executable binary can run and optionally meets min_version."""
     try:
-        res = subprocess.run([str(bin_path), '--version'], capture_output=True, text=True, timeout=5)
+        target_str = str(bin_path)
+        if os.name == 'nt' and target_str.lower().endswith(('.cmd', '.bat')):
+            res = subprocess.run(['cmd.exe', '/c', target_str, '--version'], capture_output=True, text=True, timeout=5)
+        else:
+            res = subprocess.run([target_str, '--version'], capture_output=True, text=True, timeout=5)
         if res.returncode != 0:
             return False
         if min_version > (0, 0, 0):
@@ -1183,65 +1187,131 @@ def is_binary_runnable(bin_path: Path, min_version: Tuple[int, int, int] = (0, 0
 
 def _install_opencode_into_venv(venv_dir: Path) -> bool:
     """
-    Installs OpenCode v2 CLI (`opencode-ai@latest`, >= 1.0 architecture) directly inside the
-    llm-dash virtualenv (`.venv/bin/opencode` on Linux/macOS or `.venv/Scripts/opencode.cmd` on Windows).
-    Purges legacy v1 (`~/.opencode` or `< 1.0.0`) binaries and prioritizes npm `opencode-ai@latest`.
+    Installs OpenCode v2 CLI (`@opencode/cli@latest`, >= 2.0.0 architecture) directly inside the
+    llm-dash virtualenv (`.venv/bin/opencode` on Linux/macOS or `.venv/Scripts/opencode.exe` on Windows).
+    Purges legacy v1 (`~/.opencode`, `opencode-ai` 1.x, or `< 2.0.0`) binaries and prioritizes npm `@opencode/cli@latest`.
     """
     plat = get_platform_name()
-    venv_bin_dir = venv_dir / ('Scripts' if os.name == 'nt' else 'bin')
+    is_win = (os.name == 'nt' or plat == 'windows')
+    venv_bin_dir = venv_dir / ('Scripts' if is_win else 'bin')
     venv_bin_dir.mkdir(parents=True, exist_ok=True)
     exe_name = get_executable_name('opencode')
     target_bin = venv_bin_dir / exe_name
+    win_cmd_wrapper = venv_bin_dir / 'opencode.cmd'
 
-    # Purge legacy v1 ~/.opencode installation directory if present
-    legacy_opencode_dir = Path.home() / '.opencode'
-    if legacy_opencode_dir.is_dir():
-        shutil.rmtree(legacy_opencode_dir, ignore_errors=True)
+    # Purge legacy v1 ~/.opencode installation directory and stale v1 node_modules if present
+    for legacy_dir in (
+        Path.home() / '.opencode',
+        Path.home() / '.config' / 'opencode' / 'node_modules' / '@opencode-ai',
+        venv_dir / 'node_modules' / 'opencode-ai',
+        venv_dir / 'node_modules' / '@opencode-ai',
+        venv_dir / 'node_modules' / 'opencode-linux-x64',
+        venv_dir / 'node_modules' / 'opencode-linux-x64-baseline',
+        venv_dir / 'node_modules' / 'opencode-linux-arm64',
+        venv_dir / 'node_modules' / 'opencode-darwin-arm64',
+        venv_dir / 'node_modules' / 'opencode-darwin-x64',
+        venv_dir / 'node_modules' / 'opencode-darwin-x64-baseline',
+        venv_dir / 'node_modules' / 'opencode-windows-x64',
+        venv_dir / 'node_modules' / 'opencode-windows-x64-baseline',
+        venv_dir / 'node_modules' / 'opencode-windows-arm64',
+    ):
+        if legacy_dir.is_dir():
+            shutil.rmtree(legacy_dir, ignore_errors=True)
 
-    if target_bin.is_file() or target_bin.is_symlink():
-        if is_binary_runnable(target_bin, min_version=(1, 0, 0)):
-            print(f"OpenCode v2 CLI already present and runnable in venv at {target_bin}")
-            return True
-        print(f"Existing OpenCode binary at {target_bin} is legacy v1 or failed check; upgrading to OpenCode v2...")
-        target_bin.unlink(missing_ok=True)
+    # Purge cached npx v1 opencode-ai directories across Linux/macOS (~/.npm/_npx) and Windows (LocalAppData/npm-cache/_npx)
+    npx_roots = [Path.home() / '.npm' / '_npx']
+    local_appdata = os.environ.get('LOCALAPPDATA')
+    if local_appdata:
+        npx_roots.append(Path(local_appdata) / 'npm-cache' / '_npx')
+    for npx_root in npx_roots:
+        if npx_root.is_dir():
+            for sub in npx_root.iterdir():
+                if (sub / 'node_modules' / 'opencode-ai').is_dir():
+                    shutil.rmtree(sub, ignore_errors=True)
 
-    # 1. Primary: install OpenCode v2 via npm scoped to venv_dir (`npm install --prefix <venv_dir> opencode-ai@latest`)
-    if shutil.which('npm'):
-        print(f"Installing OpenCode v2 CLI into {venv_dir} via npm (opencode-ai@latest)...")
+    # Also clean ~/.config/opencode/package.json if it pins legacy @opencode-ai/plugin 1.x
+    cfg_pkg = Path.home() / '.config' / 'opencode' / 'package.json'
+    if cfg_pkg.is_file():
         try:
-            subprocess.run(['npm', 'install', '--prefix', str(venv_dir), 'opencode-ai@latest'], check=True)
-            npm_bin = venv_dir / 'node_modules' / '.bin' / ('opencode.cmd' if os.name == 'nt' else 'opencode')
-            installed_pkg_bin = venv_dir / 'node_modules' / 'opencode-ai' / 'bin' / exe_name
-            if not installed_pkg_bin.is_file() and (venv_dir / 'node_modules' / 'opencode-ai' / 'bin' / 'opencode.exe').is_file():
-                installed_pkg_bin = venv_dir / 'node_modules' / 'opencode-ai' / 'bin' / 'opencode.exe'
+            txt = cfg_pkg.read_text(encoding='utf-8')
+            if '@opencode-ai/plugin' in txt:
+                cfg_pkg.unlink(missing_ok=True)
+                (Path.home() / '.config' / 'opencode' / 'package-lock.json').unlink(missing_ok=True)
+                shutil.rmtree(Path.home() / '.config' / 'opencode' / 'node_modules', ignore_errors=True)
+        except Exception:
+            pass
 
-            src_bin = npm_bin if npm_bin.is_file() else (installed_pkg_bin if installed_pkg_bin.is_file() else None)
-            if src_bin:
-                if os.name == 'nt':
-                    wrapper = venv_bin_dir / 'opencode.cmd'
-                    wrapper.write_text(f'@echo off\r\n"{src_bin}" %*\r\n', encoding='utf-8')
-                    check_target = wrapper
+    for existing_candidate in (target_bin, win_cmd_wrapper):
+        if existing_candidate.is_file() or existing_candidate.is_symlink():
+            if is_binary_runnable(existing_candidate, min_version=(2, 0, 0)):
+                print(f"OpenCode v2 CLI already present and runnable in venv at {existing_candidate}")
+                return True
+            print(f"Existing OpenCode binary at {existing_candidate} is legacy v1 (< 2.0.0) or failed check; upgrading to OpenCode v2...")
+            existing_candidate.unlink(missing_ok=True)
+
+    # 1. Primary: install OpenCode v2 via npm scoped to venv_dir (`npm install --prefix <venv_dir> @opencode/cli@latest`)
+    npm_exe = shutil.which('npm')
+    if npm_exe:
+        print(f"Installing OpenCode v2 CLI into {venv_dir} via npm (@opencode/cli@latest)...")
+        try:
+            subprocess.run([npm_exe, 'install', '--prefix', str(venv_dir), '@opencode/cli@latest'], check=True)
+            npm_bin = venv_dir / 'node_modules' / '.bin' / ('opencode.cmd' if is_win else 'opencode')
+            installed_pkg_bin = venv_dir / 'node_modules' / '@opencode' / 'cli' / 'bin' / 'opencode.exe'
+            if not installed_pkg_bin.is_file():
+                installed_pkg_bin = venv_dir / 'node_modules' / '@opencode' / 'cli' / 'bin' / exe_name
+
+            if is_win:
+                # On Windows, installed_pkg_bin is the native PE executable (node_modules\@opencode\cli\bin\opencode.exe).
+                # Copy it directly to .venv\Scripts\opencode.exe and write a clean opencode.cmd wrapper pointing to it.
+                if installed_pkg_bin.is_file():
+                    shutil.copy2(installed_pkg_bin, target_bin)
+                    win_cmd_wrapper.write_text(f'@echo off\r\n"{target_bin}" %*\r\n', encoding='utf-8')
+                    check_target = target_bin
+                elif npm_bin.is_file():
+                    check_target = npm_bin
                 else:
+                    check_target = None
+            else:
+                src_bin = npm_bin if (npm_bin.is_file() or npm_bin.is_symlink()) else (installed_pkg_bin if installed_pkg_bin.is_file() else None)
+                if src_bin:
                     if target_bin.exists() or target_bin.is_symlink():
                         target_bin.unlink(missing_ok=True)
                     target_bin.symlink_to(src_bin)
                     try:
-                        src_bin.chmod(0o755)
+                        resolved_bin = src_bin.resolve()
+                        resolved_bin.chmod(0o755)
+                        _strip_macos_quarantine(resolved_bin)
                     except Exception:
                         pass
+                    _strip_macos_quarantine(venv_dir / 'node_modules' / '@opencode')
                     check_target = target_bin
-                if is_binary_runnable(check_target, min_version=(1, 0, 0)):
-                    print(f"OpenCode v2 installed and verified in venv via npm ({src_bin}).")
-                    return True
+                else:
+                    check_target = None
+
+            if check_target and is_binary_runnable(check_target, min_version=(2, 0, 0)):
+                print(f"OpenCode v2 installed and verified in venv via npm ({check_target}).")
+                return True
         except Exception as e:
             print(f"Warning: venv npm install failed: {e}")
 
-    # 2. Secondary fallback: download official standalone binary release from GitHub
-    api_url = "https://api.github.com/repos/anomalyco/opencode/releases/latest"
+    # 2. Secondary fallback: download official standalone v2 binary release from GitHub
+    api_url = "https://api.github.com/repos/anomalyco/opencode/releases"
     req = urllib.request.Request(api_url, headers={'User-Agent': 'llmCode-Installer/1.0'})
     try:
         with urllib.request.urlopen(req, timeout=12) as r:
-            rel = json.loads(r.read())
+            releases = json.loads(r.read())
+        rel = None
+        if isinstance(releases, list):
+            for candidate_rel in releases:
+                tag = str(candidate_rel.get('tag_name', ''))
+                if parse_version_tuple(tag) >= (2, 0, 0):
+                    rel = candidate_rel
+                    break
+            if not rel and releases:
+                rel = releases[0]
+        elif isinstance(releases, dict):
+            rel = releases
+
         arch_is_arm = platform.machine().lower() in ('arm64', 'aarch64')
         arch_tok = 'arm64' if arch_is_arm else 'x64'
         plat_tok = 'windows' if plat == 'windows' else ('darwin' if plat == 'macos' else 'linux')
@@ -1251,7 +1321,7 @@ def _install_opencode_into_venv(venv_dir: Path) -> bool:
             is_musl = any(Path(p).is_file() for p in ['/lib/ld-musl-x86_64.so.1', '/lib/ld-musl-aarch64.so.1'])
 
         candidates = []
-        for asset in rel.get('assets', []):
+        for asset in (rel or {}).get('assets', []):
             aname = asset.get('name', '').lower()
             if not aname.endswith(('.zip', '.tar.gz', '.tgz')):
                 continue
@@ -1294,13 +1364,13 @@ def _install_opencode_into_venv(venv_dir: Path) -> bool:
                     _strip_macos_quarantine(target_bin)
                     break
             shutil.rmtree(extract_tmp, ignore_errors=True)
-            if target_bin.is_file() and is_binary_runnable(target_bin):
-                print(f"OpenCode installed into venv at: {target_bin}")
+            if target_bin.is_file() and is_binary_runnable(target_bin, min_version=(2, 0, 0)):
+                print(f"OpenCode v2 installed into venv at: {target_bin}")
                 return True
     except Exception:
         pass
 
-    print("Manual guidance for OpenCode: Ensure Node.js & npm (https://nodejs.org) are installed.")
+    print("Manual guidance for OpenCode v2: Ensure Node.js & npm (https://nodejs.org) are installed (`npm install -g @opencode/cli@latest`).")
     return False
 
 
