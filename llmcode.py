@@ -27,6 +27,7 @@ from src.common.paths import (
     LOG_FILE,
     MODEL_DIR,
     PID_FILE,
+    build_binary_env,
     get_koboldcpp_binary,
     get_llama_server_binary,
     get_ollama_binary,
@@ -286,8 +287,12 @@ def cmd_serve(args):
             return 1
         model_file = ggufs[0]
 
+    parallel_slots = max(1, int(getattr(args, 'parallel', 1) or 1))
+    effective_ctx = int(args.context) * parallel_slots
+    threads_batch = int(getattr(args, 'threads_batch', args.threads) or args.threads)
+
     print(f"Serving model: {model_file.name}")
-    print(f"Offloading {args.layers} GPU layers | Context: {args.context} | Batch: {args.batch} | Port: {args.port}")
+    print(f"Offloading {args.layers} GPU layers | Per-slot Context: {args.context} (Total KV: {effective_ctx} across {parallel_slots} slot(s)) | Batch: {args.batch} | Port: {args.port}")
 
     cmd = [
         str(llama_bin),
@@ -295,9 +300,10 @@ def cmd_serve(args):
         '--alias', args.alias or 'llamacpp',
         '--host', host,
         '--port', str(args.port),
-        '--ctx-size', str(args.context),
+        '--ctx-size', str(effective_ctx),
         '--n-gpu-layers', str(args.layers),
         '--threads', str(args.threads),
+        '--threads-batch', str(threads_batch),
         '-b', str(args.batch),
         '-ub', str(args.ubatch),
         '--temp', str(args.temp),
@@ -305,17 +311,36 @@ def cmd_serve(args):
         '--top-k', str(args.top_k),
         '--min-p', str(args.min_p),
         '--repeat-penalty', str(args.repeat_penalty),
-        '--parallel', '1',
+        '--parallel', str(parallel_slots),
         '--jinja',
         '-fa', args.flash_attn,
     ]
+    if parallel_slots > 1:
+        cmd.append('--cont-batching')
     if args.kv_cache != 'f16':
         cmd += ['-ctk', args.kv_cache, '-ctv', args.kv_cache]
     if args.custom_flags:
-        cmd.extend([c for c in args.custom_flags.split() if c.strip()])
+        raw_extra = [c for c in args.custom_flags.split() if c.strip()]
+        if parallel_slots > 1:
+            cleaned_extra = []
+            i = 0
+            while i < len(raw_extra):
+                if raw_extra[i] == '--spec-type':
+                    i += 2 if (i + 1 < len(raw_extra) and not raw_extra[i + 1].startswith('-')) else 1
+                    continue
+                if raw_extra[i].startswith('--spec-type='):
+                    i += 1
+                    continue
+                cleaned_extra.append(raw_extra[i])
+                i += 1
+            raw_extra = cleaned_extra
+        cmd.extend(raw_extra)
+
+    bin_parent = str(llama_bin.resolve().parent)
+    env = build_binary_env(llama_bin)
 
     try:
-        subprocess.run(cmd)
+        subprocess.run(cmd, cwd=bin_parent, env=env)
     except KeyboardInterrupt:
         print("\nServer stopped.")
     return 0
@@ -424,6 +449,48 @@ def cmd_aider(args):
     return 0
 
 
+def cmd_sequence(args):
+    """Run a batch of prompts in parallel across active server slots via /api/sequence/run."""
+    import json
+    cfg = sync_config()
+    dash_port = args.dash_port or cfg.get('settings', {}).get('dash_port', 7860)
+    items = [{'id': f'slot-{i + 1}', 'prompt': p, 'max_tokens': args.max_tokens} for i, p in enumerate(args.prompts) if p.strip()]
+    if not items:
+        print("Error: Provide at least one non-empty prompt.")
+        return 1
+
+    payload = {
+        'items': items,
+        'max_concurrency': args.concurrency,
+        'join_policy': args.policy,
+        'timeout_sec': args.timeout,
+    }
+    url = f"http://127.0.0.1:{dash_port}/api/sequence/run"
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode('utf-8'),
+            headers={'Content-Type': 'application/json', 'User-Agent': 'llmCode-CLI/1.0'},
+            method='POST',
+        )
+        with urllib.request.urlopen(req, timeout=args.timeout + 10) as resp:
+            summary = json.loads(resp.read(10_000_000))
+    except Exception as e:
+        print(f"Error calling parallel sequence runner at {url}: {e}")
+        return 1
+
+    print(f"=== Parallel Sequence [{summary.get('run_id')}] Verdict: {summary.get('verdict', '').upper()} ===")
+    print(f"Concurrency: {summary.get('concurrency')} | Succeeded: {summary.get('succeeded')}/{summary.get('total_items')} | Total: {summary.get('total_latency_ms')}ms\n")
+    for item in summary.get('results', []):
+        print(f"--- [{item['id']}] ({item['status'].upper()} - {item['latency_ms']}ms) ---")
+        if item['status'] == 'ok':
+            print(item.get('content', '').strip())
+        else:
+            print(f"ERROR: {item.get('error')}")
+        print()
+    return 0 if summary.get('ok') else 1
+
+
 def main():
     sanitize_system_path()
     parser = argparse.ArgumentParser(description="llmCode - Cross-Platform Local LLM Runner")
@@ -452,8 +519,10 @@ def main():
     p_serve = subparsers.add_parser("serve", help="Run llama-server")
     p_serve.add_argument("model", nargs="?", default="", help="Model name or substring")
     p_serve.add_argument("--layers", type=int, default=8, help="GPU layers to offload")
-    p_serve.add_argument("--context", type=int, default=8192, help="Context size")
+    p_serve.add_argument("--context", type=int, default=8192, help="Per-slot context size")
+    p_serve.add_argument("--parallel", type=int, default=1, help="Parallel decoding slots (--parallel N)")
     p_serve.add_argument("--threads", type=int, default=4, help="CPU threads")
+    p_serve.add_argument("--threads-batch", type=int, default=6, help="CPU threads for batch processing")
     p_serve.add_argument("--batch", type=int, default=2048, help="Batch size")
     p_serve.add_argument("--ubatch", type=int, default=256, help="Physical micro-batch size")
     p_serve.add_argument("--temp", type=float, default=0.2, help="Sampling temperature")
@@ -486,6 +555,16 @@ def main():
     p_aider.add_argument("--dir", default=".", help="Project directory")
     p_aider.add_argument("--port", type=int, default=8080, help="Server port")
     p_aider.set_defaults(func=cmd_aider)
+
+    # sequence
+    p_seq = subparsers.add_parser("sequence", help="Run multiple prompts in parallel across active server slots")
+    p_seq.add_argument("prompts", nargs="+", help="Prompts to execute concurrently")
+    p_seq.add_argument("--concurrency", type=int, default=0, help="Max concurrent workers (0 = match active --parallel slots)")
+    p_seq.add_argument("--policy", default="all_required", choices=["all_required", "best_effort"], help="Join policy for parallel tasks")
+    p_seq.add_argument("--max-tokens", type=int, default=1024, help="Max tokens per task")
+    p_seq.add_argument("--timeout", type=int, default=300, help="Timeout in seconds per task")
+    p_seq.add_argument("--dash-port", type=int, default=7860, help="Dashboard port")
+    p_seq.set_defaults(func=cmd_sequence)
 
     args = parser.parse_args()
     return args.func(args)

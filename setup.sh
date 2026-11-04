@@ -104,7 +104,7 @@ fi
 DEPLOY_STATE="$SCRIPT_DIR/config/deploy_state.json"
 if [[ "$IS_FULL" -eq 0 ]] && [[ -f "$DEPLOY_STATE" ]]; then
     echo "Existing deployment detected. Running incremental update check..."
-    "$VENV_PY" "$SCRIPT_DIR/llmcode.py" check-update "${PASSTHROUGH_ARGS[@]}"
+    "$VENV_PY" "$SCRIPT_DIR/llmcode.py" check-update ${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"}
     exit 0
 fi
 
@@ -114,7 +114,7 @@ echo "Installing core dashboard dependencies..."
 "$VENV_PIP" install -q --no-warn-script-location -r "$SCRIPT_DIR/src/LLMServer/requirements.txt"
 
 # 4. Run hardware scan, engine compiler/downloader, venv CLI agents & Continue setup
-"$VENV_PY" "$SCRIPT_DIR/llmcode.py" setup "${PASSTHROUGH_ARGS[@]}"
+"$VENV_PY" "$SCRIPT_DIR/llmcode.py" setup ${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"}
 
 echo ""
 echo "=== llmCode Setup Complete ==="

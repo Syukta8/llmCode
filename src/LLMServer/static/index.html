@@ -406,7 +406,7 @@
         <input id="layers" type="number" min="0" max="999" value="8">
       </div>
       <div class="field">
-        <label>Context Size (-c)</label>
+        <label>Context Size (-c per slot)</label>
         <div style="display:flex; gap:6px;">
           <select id="context" onchange="onContextSelectChange()" style="flex:1;">
             <option value="4096">4K (4,096)</option>
@@ -422,6 +422,16 @@
           </select>
           <input id="contextCustom" type="number" min="512" max="1048576" step="512" value="8192" style="display:none; width:110px;" oninput="onCustomContextInput()" placeholder="Tokens">
         </div>
+      </div>
+      <div class="field">
+        <label>Parallel Slots (--parallel) <span id="totalKvBadge" class="badge">KV: 8K</span></label>
+        <select id="parallel" onchange="onParallelChange()">
+          <option value="1" selected>1 Slot (Single Agent / MTP OK)</option>
+          <option value="2">2 Slots (Cont-Batching)</option>
+          <option value="4">4 Slots (Multi-Agent)</option>
+          <option value="8">8 Slots (High Concurrency)</option>
+          <option value="16">16 Slots (Batch Pipeline)</option>
+        </select>
       </div>
       <div class="field">
         <label>CPU Threads (-t)</label>
@@ -599,11 +609,34 @@
         <input id="historyTarget" class="mono" placeholder=".aider.chat.history.md or OpenCode session ID">
       </div>
     </div>
-  </div>
 
-  <div id="keyRotatedBanner" style="display:none; background:#ff444422; border:1px solid #ff444466; color:#ff8888; padding:8px 14px; border-radius:6px; margin-bottom:14px; font-size:12.5px; align-items:center; justify-content:space-between;">
-    <span><strong>API Key Rotated:</strong> Backend restarted with a fresh API key. Active Aider or OpenCode terminal sessions will get 401 until relaunched.</span>
-    <button class="subtle" onclick="$('keyRotatedBanner').style.display='none'" style="padding:2px 8px; font-size:11px;">Dismiss</button>
+    <details style="margin-top: 12px;">
+      <summary>Parallel Sequence Runner (Fan-Out / Fan-In Pipeline)</summary>
+      <div class="content">
+        <div class="form-grid" style="margin-bottom: 10px;">
+          <div class="field" style="grid-column: span 2;">
+            <label>Parallel Prompts (One task per line)</label>
+            <textarea id="seqPrompts" class="mono" rows="4" style="width:100%; background:#0a0e17; color:var(--text-main); border:1px solid var(--card-border); border-radius:6px; padding:8px; font-size:12px;" placeholder="Write unit test for auth module&#10;Audit SQL queries for injection&#10;Summarize API endpoints"></textarea>
+          </div>
+          <div class="field">
+            <label>Max Concurrency</label>
+            <select id="seqConcurrency">
+              <option value="0" selected>Auto (Match --parallel slots)</option>
+              <option value="2">2 Concurrent Workers</option>
+              <option value="4">4 Concurrent Workers</option>
+              <option value="8">8 Concurrent Workers</option>
+            </select>
+            <label style="margin-top:8px;">Join Policy</label>
+            <select id="seqPolicy">
+              <option value="all_required" selected>all_required (Fail-fast containment)</option>
+              <option value="best_effort">best_effort (Allow partial completion)</option>
+            </select>
+            <button class="primary" type="button" onclick="runParallelSequence()" style="margin-top:10px; width:100%;">Run Parallel Sequence</button>
+          </div>
+        </div>
+        <pre id="seqOutput" style="display:none; max-height:220px; overflow:auto; font-size:11.5px; margin-top:8px;"></pre>
+      </div>
+    </details>
   </div>
 
   <!-- Local Models & Hugging Face Catalog Tabs -->
@@ -906,6 +939,7 @@ function onContextSelectChange() {
     const chosenVal = parseInt(ctxSelect.value, 10);
     baseContextSize = Math.max(512, Math.round(chosenVal / mult));
   }
+  updateTotalKvBadge();
 }
 
 function onCustomContextInput() {
@@ -913,6 +947,59 @@ function onCustomContextInput() {
   const multMap = { none: 1, linear_2x: 2, yarn_2x: 2, yarn_4x: 4, yarn_8x: 8 };
   const mult = multMap[mode] || 1;
   baseContextSize = Math.max(512, Math.round(getContextValue() / mult));
+  updateTotalKvBadge();
+}
+
+function updateTotalKvBadge() {
+  const perSlot = getContextValue();
+  const slots = parseInt($('parallel') ? $('parallel').value : '1', 10) || 1;
+  const total = perSlot * slots;
+  const badge = $('totalKvBadge');
+  if (badge) {
+    badge.textContent = total >= 1024 ? `KV: ${Math.round(total / 1024)}K` : `KV: ${total}`;
+  }
+}
+
+function onParallelChange() {
+  updateTotalKvBadge();
+  const slots = parseInt($('parallel').value, 10) || 1;
+  const perSlot = getContextValue();
+  if (slots > 1) {
+    toast(`Parallel slots=${slots} -> Total KV context=${(perSlot * slots).toLocaleString()} tokens (--cont-batching enabled; draft-mtp auto-disabled)`);
+  }
+}
+
+async function runParallelSequence() {
+  const raw = ($('seqPrompts').value || '').split('\n').map(s => s.trim()).filter(Boolean);
+  if (!raw.length) {
+    toast('Enter at least one prompt line to run a parallel sequence');
+    return;
+  }
+  const out = $('seqOutput');
+  out.style.display = 'block';
+  out.textContent = `Running ${raw.length} parallel sequence tasks...`;
+  try {
+    const res = await post('/sequence/run', {
+      items: raw.map((p, idx) => ({ id: `slot-${idx + 1}`, prompt: p, max_tokens: 512 })),
+      max_concurrency: parseInt($('seqConcurrency').value, 10) || 0,
+      join_policy: $('seqPolicy').value,
+    });
+    const lines = [
+      `Run ID: ${res.run_id} | Verdict: ${res.verdict.toUpperCase()} | Concurrency: ${res.concurrency} | Total: ${res.total_latency_ms}ms`,
+      `Succeeded: ${res.succeeded}/${res.total_items} | Failed: ${res.failed} | Cancelled: ${res.cancelled}`,
+      '--------------------------------------------------------------------------------'
+    ];
+    for (const item of res.results) {
+      lines.push(`[${item.id}] (${item.status.toUpperCase()} - ${item.latency_ms}ms)`);
+      lines.push(item.status === 'ok' ? (item.content || '(empty)') : `ERROR: ${item.error}`);
+      lines.push('');
+    }
+    out.textContent = lines.join('\n');
+    toast(`Parallel sequence ${res.verdict}: ${res.succeeded}/${res.total_items} succeeded`);
+  } catch (e) {
+    out.textContent = 'Sequence Error: ' + e.message;
+    toast('Sequence Error: ' + e.message);
+  }
 }
 
 function onContextExtendChange() {
@@ -946,6 +1033,7 @@ function getDeployPayload() {
     alias: $('alias').value,
     layers: +$('layers').value,
     context: getContextValue(),
+    parallel: +($('parallel') ? $('parallel').value : 1) || 1,
     threads: +$('threads').value,
     threads_batch: +$('threads_batch').value,
     batch: +$('batch').value,
@@ -1216,6 +1304,8 @@ async function init() {
     if (s.last_alias) $('alias').value = s.last_alias;
     if (s.last_layers) $('layers').value = s.last_layers;
     if (s.last_context) setContextValue(s.last_context);
+    if (s.last_parallel && $('parallel')) $('parallel').value = String(s.last_parallel);
+    updateTotalKvBadge();
     if (s.last_threads) $('threads').value = s.last_threads;
     if (s.last_threads_batch) $('threads_batch').value = s.last_threads_batch;
     if (s.last_batch) $('batch').value = s.last_batch;

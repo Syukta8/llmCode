@@ -14,7 +14,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 # Repository root directory
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -119,6 +119,30 @@ def get_executable_name(name: str) -> str:
     return name
 
 
+def build_binary_env(bin_path: Path, base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """
+    Constructs an environment dictionary with the binary's parent directory prepended
+    to PATH (Windows DLLs), LD_LIBRARY_PATH (Linux .so), and DYLD_LIBRARY_PATH (macOS .dylib)
+    so prebuilt and source-built shared libraries resolve deterministically on all platforms.
+    """
+    env = dict(base_env if base_env is not None else os.environ)
+    try:
+        bin_parent = str(Path(bin_path).resolve().parent)
+    except Exception:
+        bin_parent = str(Path(bin_path).parent)
+    env['PATH'] = bin_parent + os.pathsep + env.get('PATH', '')
+    plat = get_platform_name()
+    if plat == 'linux':
+        cur_ld = env.get('LD_LIBRARY_PATH', '')
+        env['LD_LIBRARY_PATH'] = f"{bin_parent}:{cur_ld}" if cur_ld else bin_parent
+    elif plat == 'macos':
+        cur_dyld = env.get('DYLD_LIBRARY_PATH', '')
+        env['DYLD_LIBRARY_PATH'] = f"{bin_parent}:{cur_dyld}" if cur_dyld else bin_parent
+        cur_fb = env.get('DYLD_FALLBACK_LIBRARY_PATH', '')
+        env['DYLD_FALLBACK_LIBRARY_PATH'] = f"{bin_parent}:{cur_fb}" if cur_fb else bin_parent
+    return env
+
+
 def load_hardware() -> Dict[str, Any]:
     """Loads config/hardware.json if present, else returns an empty dict."""
     with _config_lock:
@@ -185,17 +209,30 @@ def _discover_koboldcpp() -> Path:
             return p
 
     exe = get_executable_name('koboldcpp')
-    candidates = [
-        SRC_DIR / 'koboldcpp' / 'koboldcpp.py',
+    plat = get_platform_name()
+    src_script = SRC_DIR / 'koboldcpp' / 'koboldcpp.py'
+    src_has_compiled_lib = False
+    if src_script.is_file():
+        for ext in ('*.so', '*.dll', '*.dylib'):
+            if list((SRC_DIR / 'koboldcpp').glob(f'koboldcpp_*{ext[1:]}')):
+                src_has_compiled_lib = True
+                break
+
+    candidates = []
+    if src_has_compiled_lib:
+        candidates.append(src_script)
+    candidates.extend([
+        BIN_DIR / plat / exe,
         BIN_DIR / exe,
         BIN_DIR / 'windows' / exe,
         BIN_DIR / 'macos' / exe,
         BIN_DIR / 'linux' / exe,
-    ]
+        src_script,
+    ])
     for c in candidates:
         if c.is_file():
             return c.resolve()
-    return candidates[0]
+    return BIN_DIR / plat / exe
 
 
 def _discover_ollama() -> Path:
@@ -241,8 +278,17 @@ def _discover_aider() -> Optional[str]:
     return str(Path(found).resolve()) if found else None
 
 
+def parse_version_tuple(version_str: str) -> Tuple[int, int, int]:
+    """Extracts (major, minor, patch) integers from a CLI --version output string."""
+    import re
+    m = re.search(r'(\d+)\.(\d+)(?:\.(\d+))?', version_str or '')
+    if not m:
+        return (0, 0, 0)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
+
+
 def _discover_opencode() -> Optional[str]:
-    """Discovers opencode CLI executable prioritizing llm-dash venv (.venv/bin or .venv/Scripts)."""
+    """Discovers OpenCode v2 (`opencode-ai` >= 1.0 / v2 architecture) CLI executable prioritizing llm-dash venv, rejecting legacy v1 (< 1.0) binaries."""
     exe = get_executable_name('opencode')
     venv_dir = SRC_DIR / 'LLMServer' / '.venv'
     venv_bin_dir = venv_dir / ('Scripts' if os.name == 'nt' else 'bin')
@@ -251,19 +297,33 @@ def _discover_opencode() -> Optional[str]:
         venv_bin_dir / 'opencode.cmd',
         venv_dir / 'node_modules' / '.bin' / ('opencode.cmd' if os.name == 'nt' else 'opencode'),
         venv_dir / 'node_modules' / 'opencode-ai' / 'bin' / 'opencode.exe',
-        Path.home() / '.opencode' / 'bin' / exe,
+        venv_dir / 'node_modules' / 'opencode-ai' / 'bin' / exe,
         Path.home() / '.local' / 'bin' / exe,
     ]
     for c in candidates:
         if c.is_file():
             try:
-                res = subprocess.run([str(c.resolve()), '--version'], capture_output=True, timeout=3)
+                res = subprocess.run([str(c.resolve()), '--version'], capture_output=True, text=True, timeout=3)
                 if res.returncode == 0:
-                    return str(c.resolve())
+                    ver_out = (res.stdout or '') + (res.stderr or '')
+                    ver = parse_version_tuple(ver_out)
+                    # Reject legacy v1 (0.x) sst/opencode binaries; require v2 architecture (1.0+)
+                    if ver >= (1, 0, 0) or ver == (0, 0, 0):
+                        return str(c.resolve())
             except Exception:
                 pass
-    found = shutil.which('opencode') or shutil.which('opencode2')
-    return str(Path(found).resolve()) if found else None
+    found = shutil.which('opencode2') or shutil.which('opencode')
+    if found:
+        try:
+            res = subprocess.run([str(Path(found).resolve()), '--version'], capture_output=True, text=True, timeout=3)
+            if res.returncode == 0:
+                ver_out = (res.stdout or '') + (res.stderr or '')
+                ver = parse_version_tuple(ver_out)
+                if ver >= (1, 0, 0) or ver == (0, 0, 0):
+                    return str(Path(found).resolve())
+        except Exception:
+            pass
+    return None
 
 
 def _default_config() -> Dict[str, Any]:
@@ -312,6 +372,7 @@ def _default_config() -> Dict[str, Any]:
             'last_alias': 'llamacpp',
             'last_layers': int(rt.get('layers', 8)),
             'last_context': int(rt.get('context', 8192)),
+            'last_parallel': int(rt.get('parallel', 1)),
             'last_threads': int(rt.get('threads', 4)),
             'last_threads_batch': int(rt.get('threads_batch', 6)),
             'last_batch': int(rt.get('batch', 2048)),
@@ -429,6 +490,7 @@ def sync_config(apply_hardware_defaults: bool = False) -> Dict[str, Any]:
         if (apply_hardware_defaults or is_new) and rt:
             cfg['settings']['last_layers'] = int(rt.get('layers', cfg['settings'].get('last_layers', 8)))
             cfg['settings']['last_context'] = int(rt.get('context', cfg['settings'].get('last_context', 8192)))
+            cfg['settings']['last_parallel'] = int(rt.get('parallel', cfg['settings'].get('last_parallel', 1)))
             cfg['settings']['last_threads'] = int(rt.get('threads', cfg['settings'].get('last_threads', 4)))
             cfg['settings']['last_threads_batch'] = int(rt.get('threads_batch', cfg['settings'].get('last_threads_batch', 6)))
             cfg['settings']['last_batch'] = int(rt.get('batch', cfg['settings'].get('last_batch', 2048)))

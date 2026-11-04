@@ -1,7 +1,8 @@
+import concurrent.futures
 import json, os, re, secrets, struct, subprocess, threading, time, urllib.request, urllib.parse, urllib.error, shutil, signal, uuid
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -22,6 +23,7 @@ from src.common.paths import (
     HARDWARE_FILE,
     MODEL_DIR,
     LOG_FILE,
+    build_binary_env,
     get_llama_server_binary,
     get_koboldcpp_binary,
     get_ollama_binary,
@@ -52,6 +54,81 @@ proc = None
 log_handle = None
 opencode_proc = None
 aider_proc = None
+opencode_procs: List[Dict[str, Any]] = []
+aider_procs: List[Dict[str, Any]] = []
+_binary_flags_cache: Dict[str, Tuple[float, Set[str]]] = {}
+
+
+def _prune_agent_procs(proc_list: List[Dict[str, Any]], legacy_proc: Any = None) -> List[Dict[str, Any]]:
+    """Filters active agent processes whose Popen handles are still alive."""
+    alive_list: List[Dict[str, Any]] = []
+    seen_pids: Set[int] = set()
+    for item in proc_list:
+        p = item.get('proc')
+        if p is not None and p.poll() is None:
+            alive_list.append(item)
+            if getattr(p, 'pid', None):
+                seen_pids.add(p.pid)
+    if legacy_proc is not None and legacy_proc.poll() is None and getattr(legacy_proc, 'pid', None) not in seen_pids:
+        alive_list.append({
+            'pid': legacy_proc.pid,
+            'proc': legacy_proc,
+            'project_dir': '',
+            'started_at': '',
+        })
+    return alive_list
+
+
+def get_binary_supported_flags(bin_path: Path) -> Set[str]:
+    """Probes `<binary> --help` once per mtime and returns supported CLI flags."""
+    if not bin_path or not bin_path.is_file():
+        return set()
+    key = str(bin_path.resolve())
+    try:
+        mtime = bin_path.stat().st_mtime
+    except Exception:
+        mtime = 0.0
+    cached = _binary_flags_cache.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    env = build_binary_env(bin_path)
+    bin_parent = str(bin_path.resolve().parent)
+    cmd = [sys.executable, key, '--help'] if bin_path.suffix.lower() == '.py' else [key, '--help']
+    flags: Set[str] = set()
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5, cwd=bin_parent, env=env)
+        out = (res.stdout or '') + '\n' + (res.stderr or '')
+        for token in re.findall(r'(?<!\w)(--[a-zA-Z0-9][a-zA-Z0-9_-]*|-[a-zA-Z0-9]+)', out):
+            flags.add(token)
+    except Exception:
+        pass
+    _binary_flags_cache[key] = (mtime, flags)
+    return flags
+
+
+def strip_incompatible_parallel_flags(custom_args: List[str], parallel_slots: int) -> Tuple[List[str], bool]:
+    """Removes `--spec-type draft-mtp` (and standalone `--spec-type`) when `parallel_slots > 1`."""
+    if parallel_slots <= 1 or not custom_args:
+        return list(custom_args), False
+    cleaned: List[str] = []
+    stripped = False
+    i = 0
+    while i < len(custom_args):
+        arg = custom_args[i]
+        if arg == '--spec-type':
+            stripped = True
+            if i + 1 < len(custom_args) and not custom_args[i + 1].startswith('-'):
+                i += 2
+            else:
+                i += 1
+            continue
+        if arg.startswith('--spec-type='):
+            stripped = True
+            i += 1
+            continue
+        cleaned.append(arg)
+        i += 1
+    return cleaned, stripped
 
 
 def load_downloads():
@@ -208,6 +285,7 @@ class Deploy(BaseModel):
     alias: str = Field(default='llamacpp', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
     layers: int = Field(default=8, ge=0, le=999)
     context: int = Field(default=8192, ge=512, le=1048576)
+    parallel: int = Field(default=1, ge=1, le=32)
     threads: int = Field(default=4, ge=1, le=256)
     threads_batch: int = Field(default=6, ge=1, le=256)
     batch: int = Field(default=2048, ge=32, le=65536)
@@ -250,6 +328,7 @@ class OpenCodeLaunch(BaseModel):
     alias: str = Field(default='llamacpp', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
     layers: int = Field(default=8, ge=0, le=999)
     context: int = Field(default=8192, ge=512, le=1048576)
+    parallel: int = Field(default=1, ge=1, le=32)
     threads: int = Field(default=4, ge=1, le=256)
     threads_batch: int = Field(default=6, ge=1, le=256)
     batch: int = Field(default=2048, ge=32, le=65536)
@@ -279,6 +358,7 @@ class AiderLaunch(BaseModel):
     alias: str = Field(default='llamacpp', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
     layers: int = Field(default=8, ge=0, le=999)
     context: int = Field(default=8192, ge=512, le=1048576)
+    parallel: int = Field(default=1, ge=1, le=32)
     threads: int = Field(default=4, ge=1, le=256)
     threads_batch: int = Field(default=6, ge=1, le=256)
     batch: int = Field(default=2048, ge=32, le=65536)
@@ -300,6 +380,21 @@ class AiderLaunch(BaseModel):
     edit_format: str = Field(default='diff', pattern=r'^(diff|whole|udiff|architect)$')
     restore_history: bool = False
     history_file: str = ''
+
+
+class SequenceTaskItem(BaseModel):
+    id: str = ''
+    prompt: str
+    system: str = ''
+    max_tokens: int = Field(default=1024, ge=1, le=32768)
+    temp: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+
+
+class SequenceRunRequest(BaseModel):
+    items: List[SequenceTaskItem] = Field(..., min_length=1, max_length=64)
+    max_concurrency: int = Field(default=0, ge=0, le=32)
+    join_policy: str = Field(default='all_required', pattern=r'^(all_required|best_effort)$')
+    timeout_sec: int = Field(default=300, ge=5, le=3600)
 
 
 def safe_model_path(path):
@@ -335,6 +430,7 @@ def server_health():
 
 
 def system_status():
+    global opencode_procs, aider_procs
     gpu = {'available': False}
     try:
         if sys.platform == 'darwin':
@@ -344,16 +440,47 @@ def system_status():
                 name = m.group(1).strip() if m else 'Apple Metal GPU'
                 gpu = {'available': True, 'name': name, 'total_mb': 0, 'used_mb': 0, 'util_pct': 0, 'temperature_c': 0}
         else:
-            r = subprocess.run(
-                ['nvidia-smi', '--query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu', '--format=csv,noheader,nounits'],
-                capture_output=True, text=True, timeout=4
-            )
-            if r.returncode == 0:
-                v = [x.strip() for x in r.stdout.splitlines()[0].split(',')]
-                if len(v) >= 5:
-                    gpu = {'available': True, 'name': v[0], 'total_mb': int(v[1]), 'used_mb': int(v[2]), 'util_pct': int(v[3]), 'temperature_c': int(v[4])}
+            smi_bin = shutil.which('nvidia-smi')
+            if not smi_bin and os.name == 'nt':
+                for c in (
+                    Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'nvidia-smi.exe',
+                    Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'NVIDIA Corporation' / 'NVSMI' / 'nvidia-smi.exe',
+                ):
+                    if c.is_file():
+                        smi_bin = str(c)
+                        break
+            if smi_bin:
+                r = subprocess.run(
+                    [smi_bin, '--query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu', '--format=csv,noheader,nounits'],
+                    capture_output=True, text=True, timeout=4
+                )
+                if r.returncode == 0 and r.stdout.strip():
+                    v = [x.strip() for x in r.stdout.splitlines()[0].split(',')]
+                    if len(v) >= 5:
+                        def _safe_int(val: str) -> int:
+                            m_i = re.search(r'(\d+)', val or '')
+                            return int(m_i.group(1)) if m_i else 0
+                        gpu = {
+                            'available': True,
+                            'name': v[0],
+                            'total_mb': _safe_int(v[1]),
+                            'used_mb': _safe_int(v[2]),
+                            'util_pct': _safe_int(v[3]),
+                            'temperature_c': _safe_int(v[4]),
+                        }
     except Exception:
         pass
+    if not gpu.get('available'):
+        hw_gpu = load_hardware().get('gpu', {})
+        if hw_gpu.get('available'):
+            gpu = {
+                'available': True,
+                'name': hw_gpu.get('name', 'GPU'),
+                'total_mb': int(hw_gpu.get('vram_mb', 0)),
+                'used_mb': 0,
+                'util_pct': 0,
+                'temperature_c': 0,
+            }
 
     mem = {}
     try:
@@ -401,6 +528,8 @@ def system_status():
         pass
 
     server_bin = get_llama_server_binary()
+    oc_alive = _prune_agent_procs(opencode_procs, opencode_proc)
+    ad_alive = _prune_agent_procs(aider_procs, aider_proc)
     return {
         'gpu': gpu,
         'ram': mem,
@@ -412,10 +541,8 @@ def system_status():
         'server_port': PORT,
         'api_key': get_current_api_key(),
         'key_rotated_at': _key_rotated_at,
-        'agents_running': bool(
-            (opencode_proc is not None and opencode_proc.poll() is None) or
-            (aider_proc is not None and aider_proc.poll() is None)
-        ),
+        'agents_running': bool(oc_alive or ad_alive),
+        'agent_session_count': len(oc_alive) + len(ad_alive),
         'platform': sys.platform,
     }
 
@@ -595,7 +722,7 @@ def build_context_extension_flags(backend: str, preset: str) -> list:
 
 
 def launch_backend_process(backend, path, params):
-    """Launch llama.cpp, koboldcpp, or ollama on port PORT with standard alias and extended parameter support."""
+    """Launch llama.cpp, koboldcpp, or ollama on port PORT with standard alias, parallel slot scaling, and binary flag probing."""
     global proc, log_handle
     sync_config()
     server_bin = get_llama_server_binary()
@@ -607,10 +734,17 @@ def launch_backend_process(backend, path, params):
     if not getattr(params, 'alias', '') or params.alias in ('local-qwen', 'llamacpp', 'koboldcpp', 'ollama'):
         params.alias = std_alias
 
+    parallel_slots = max(1, int(getattr(params, 'parallel', 1) or 1))
+    per_slot_ctx = int(getattr(params, 'context', 8192) or 8192)
+    effective_ctx = per_slot_ctx * parallel_slots
+
     ctx_ext = getattr(params, 'context_extend', 'none') or 'none'
     rag_on = bool(getattr(params, 'rag_enabled', False))
     ext_flags = build_context_extension_flags(backend, ctx_ext)
-    custom_args = [arg for arg in params.custom_flags.split() if arg.strip()] if getattr(params, 'custom_flags', None) else []
+    raw_custom_args = [arg for arg in params.custom_flags.split() if arg.strip()] if getattr(params, 'custom_flags', None) else []
+    custom_args, stripped_spec = strip_incompatible_parallel_flags(raw_custom_args, parallel_slots)
+    if stripped_spec:
+        append_log(f"[INFO] Auto-disabled --spec-type draft-mtp because parallel={parallel_slots} > 1 (incompatible with multi-slot continuous batching)")
 
     key = rotate_api_key()
     lan = bool(getattr(params, 'lan_access', False))
@@ -619,11 +753,12 @@ def launch_backend_process(backend, path, params):
     if backend == 'koboldcpp':
         if not kobold_bin.is_file():
             raise HTTPException(400, f'koboldcpp not found at {kobold_bin}')
+        supported = get_binary_supported_flags(kobold_bin)
         base_cmd = [sys.executable, str(kobold_bin)] if kobold_bin.suffix.lower() == '.py' else [str(kobold_bin)]
         args = base_cmd + [
             '--model', str(path),
             '--port', str(PORT),
-            '--contextsize', str(params.context),
+            '--contextsize', str(effective_ctx),
             '--gpulayers', str(params.layers),
             '--threads', str(params.threads),
             '--blasbatchsize', str(params.batch),
@@ -631,14 +766,25 @@ def launch_backend_process(backend, path, params):
             '--skiplauncher', '--quiet', '--host', bind_host,
             '--password', key,
         ]
-        if params.layers > 0 and sys.platform != 'darwin':
+        flavor_file = kobold_bin.parent / 'koboldcpp.flavor'
+        flavor = flavor_file.read_text(encoding='utf-8').strip().lower() if flavor_file.is_file() else ''
+        can_use_cuda = (
+            params.layers > 0
+            and sys.platform != 'darwin'
+            and flavor != 'cpu'
+            and 'nocuda' not in kobold_bin.name.lower()
+            and (not supported or '--usecuda' in supported)
+        )
+        if can_use_cuda:
             args.append('--usecuda')
-        if params.flash_attn == 'on':
+        if params.flash_attn == 'on' and (not supported or '--flashattention' in supported):
             args.append('--flashattention')
-        if params.kv_cache == 'q8_0':
+        if params.kv_cache == 'q8_0' and (not supported or '--quantkv' in supported):
             args.extend(['--quantkv', '1'])
-        elif params.kv_cache == 'q4_0':
+        elif params.kv_cache == 'q4_0' and (not supported or '--quantkv' in supported):
             args.extend(['--quantkv', '2'])
+        if parallel_slots > 1 and (not supported or '--multiuser' in supported):
+            args.extend(['--multiuser', str(parallel_slots)])
         # KoboldCpp does not have a standalone --embeddings flag (only --embeddingsmodel).
         # We omit it to prevent CLI parameter errors.
         args.extend(ext_flags)
@@ -650,7 +796,7 @@ def launch_backend_process(backend, path, params):
         modelfile_path = STORE / 'Modelfile'
         modelfile_content = [
             f"FROM {path}",
-            f"PARAMETER num_ctx {params.context}",
+            f"PARAMETER num_ctx {effective_ctx}",
             f"PARAMETER num_gpu {params.layers}",
             f"PARAMETER num_thread {params.threads}",
             f"PARAMETER temperature {params.temp}",
@@ -676,11 +822,12 @@ def launch_backend_process(backend, path, params):
     else:  # default llama.cpp
         if not server_bin.is_file():
             raise HTTPException(400, f'llama-server not found at {server_bin}')
+        supported = get_binary_supported_flags(server_bin)
         args = [
             str(server_bin), '--model', str(path), '--alias', params.alias,
             '--host', bind_host, '--port', str(PORT),
             '--api-key-file', str(API_KEY_FILE),
-            '--ctx-size', str(params.context),
+            '--ctx-size', str(effective_ctx),
             '--n-gpu-layers', str(params.layers),
             '--threads', str(params.threads),
             '--threads-batch', str(getattr(params, 'threads_batch', params.threads)),
@@ -691,27 +838,41 @@ def launch_backend_process(backend, path, params):
             '--top-k', str(params.top_k),
             '--min-p', str(params.min_p),
             '--repeat-penalty', str(params.repeat_penalty),
-            '--parallel', '1', '--jinja',
+            '--parallel', str(parallel_slots),
+            '--jinja',
             '-fa', params.flash_attn,
             '-sm', params.split_mode,
             '--main-gpu', str(params.main_gpu),
         ]
+        if parallel_slots > 1:
+            if not supported or '--cont-batching' in supported:
+                args.append('--cont-batching')
+            if '-kvu' in supported:
+                args.append('-kvu')
+            elif '--kv-unified' in supported:
+                args.append('--kv-unified')
         if params.kv_cache != 'f16':
             args += ['-ctk', params.kv_cache, '-ctv', params.kv_cache]
-        if hasattr(params, 'reasoning') and not params.reasoning:
-            args += ['--reasoning', 'off']
-        else:
-            args += ['--reasoning', 'on']
+        want_reasoning = not (hasattr(params, 'reasoning') and not params.reasoning)
+        if not supported or '--reasoning' in supported:
+            args += ['--reasoning', 'on' if want_reasoning else 'off']
+        elif '--reasoning-budget' in supported:
+            args += ['--reasoning-budget', '-1' if want_reasoning else '0']
         if rag_on:
             args += ['--embeddings', '--pooling', 'mean']
         args.extend(ext_flags)
-        if params.context > 0 and not any('--override-kv' in a for a in custom_args):
+        if effective_ctx > 0 and not any('--override-kv' in a for a in custom_args):
             arch = get_gguf_architecture(path)
             if arch:
-                args.extend(['--override-kv', f'{arch}.context_length=int:{params.context}'])
+                args.extend(['--override-kv', f'{arch}.context_length=int:{effective_ctx}'])
         args.extend(custom_args)
 
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if log_handle is not None:
+        try:
+            log_handle.close()
+        except Exception:
+            pass
     log_handle = open(LOG_FILE, 'a', buffering=1, encoding='utf-8')
     masked_args = mask_command_args(args)
     cmd_str = ' '.join(f'"{a}"' if ' ' in a else a for a in masked_args)
@@ -719,13 +880,12 @@ def launch_backend_process(backend, path, params):
     log_handle.write(f'[COMMAND] {cmd_str}\n')
     log_handle.flush()
 
-    env = os.environ.copy()
+    bin_target = Path(args[1] if len(args) > 1 and args[0] == sys.executable else args[0]).resolve()
+    bin_parent = str(bin_target.parent)
+    env = build_binary_env(bin_target)
     if backend == 'ollama':
         env['OLLAMA_HOST'] = f'127.0.0.1:{PORT}'
-
-    # Ensure the binary's directory is in PATH so Windows finds companion CUDA DLLs (ggml-cuda.dll, cublas64_*.dll)
-    bin_parent = str(Path(args[0]).resolve().parent)
-    env['PATH'] = bin_parent + os.pathsep + env.get('PATH', '')
+        env['OLLAMA_NUM_PARALLEL'] = str(parallel_slots)
 
     try:
         proc = subprocess.Popen(
@@ -751,7 +911,9 @@ def launch_backend_process(backend, path, params):
         'path': str(path),
         'alias': params.alias,
         'layers': params.layers,
-        'context': params.context,
+        'context': per_slot_ctx,
+        'parallel': parallel_slots,
+        'effective_context': effective_ctx,
         'threads': params.threads,
         'threads_batch': getattr(params, 'threads_batch', params.threads),
         'batch': params.batch,
@@ -767,7 +929,8 @@ def launch_backend_process(backend, path, params):
         'repeat_penalty': params.repeat_penalty,
         'main_gpu': params.main_gpu,
         'split_mode': params.split_mode,
-        'custom_flags': params.custom_flags,
+        'custom_flags': ' '.join(custom_args),
+        'spec_auto_disabled': stripped_spec,
     }
     runtime_state['pid'] = proc.pid
     return args
@@ -786,6 +949,7 @@ def start(params: Deploy):
             'last_alias': params.alias,
             'last_layers': params.layers,
             'last_context': params.context,
+            'last_parallel': params.parallel,
             'last_threads': params.threads,
             'last_threads_batch': params.threads_batch,
             'last_batch': params.batch,
@@ -811,9 +975,15 @@ def start(params: Deploy):
 
 @app.post('/api/stop')
 def stop():
-    global proc
+    global proc, log_handle
     with lock:
         clear_api_key()
+        if log_handle is not None:
+            try:
+                log_handle.close()
+            except Exception:
+                pass
+            log_handle = None
         if not alive():
             return {'ok': True, 'message': 'No dashboard-managed server running'}
         pid = proc.pid
@@ -992,14 +1162,21 @@ def list_directories(base: str = ''):
 
 @app.get('/api/opencode/status')
 def opencode_status():
-    global opencode_proc
-    running = opencode_proc is not None and opencode_proc.poll() is None
+    global opencode_proc, opencode_procs
+    opencode_procs[:] = _prune_agent_procs(opencode_procs, opencode_proc)
+    running = len(opencode_procs) > 0
+    latest_pid = opencode_procs[-1]['pid'] if running else None
     cfg = sync_config()
     found_bin = cfg.get('agents', {}).get('opencode')
     installed = bool(found_bin)
     return {
         'running': running,
-        'pid': opencode_proc.pid if running else None,
+        'pid': latest_pid,
+        'session_count': len(opencode_procs),
+        'active_sessions': [
+            {'pid': s['pid'], 'project_dir': s.get('project_dir', ''), 'started_at': s.get('started_at', '')}
+            for s in opencode_procs
+        ],
         'installed': installed,
         'binary': found_bin,
         'terminal': detect_terminal(),
@@ -1188,6 +1365,7 @@ def launch_opencode(params: OpenCodeLaunch):
         'last_alias': params.alias,
         'last_layers': params.layers,
         'last_context': params.context,
+        'last_parallel': params.parallel,
         'last_threads': params.threads,
         'last_threads_batch': params.threads_batch,
         'last_batch': params.batch,
@@ -1217,7 +1395,7 @@ def launch_opencode(params: OpenCodeLaunch):
     write_opencode_config(project, params.alias, PORT, rag_context_file=rag_file, context_limit=params.context)
 
     cfg = sync_config()
-    oc_bin = cfg.get('agents', {}).get('opencode') or 'npx opencode-ai'
+    oc_bin = cfg.get('agents', {}).get('opencode') or 'npx opencode-ai@latest'
     oc_cmd = (f'"{oc_bin}"' if ' ' in str(oc_bin) and not str(oc_bin).startswith('npx ') else f'{oc_bin}') + ' --auto'
     if params.restore_history:
         if params.session_id.strip():
@@ -1225,26 +1403,41 @@ def launch_opencode(params: OpenCodeLaunch):
         else:
             oc_cmd += ' --continue'
     os.environ['OPENCODE_DISABLE_CLAUDE_CODE_SKILLS'] = '1'
-    opencode_proc = spawn_in_terminal(oc_cmd, cwd=project, title="OpenCode CLI")
+    opencode_proc = spawn_in_terminal(oc_cmd, cwd=project, title="OpenCode v2 CLI")
+    opencode_procs[:] = _prune_agent_procs(opencode_procs)
+    opencode_procs.append({
+        'pid': opencode_proc.pid,
+        'proc': opencode_proc,
+        'project_dir': str(project),
+        'started_at': datetime.now().isoformat(timespec='seconds'),
+    })
     return {
         'ok': True,
-        'message': f'OpenCode CLI launching in terminal (model: llmcode/{params.alias}).',
+        'message': f'OpenCode v2 CLI launching in terminal (model: llmcode/{params.alias}).',
         'terminal': terminal,
         'project_dir': str(project),
         'opencode_pid': opencode_proc.pid,
+        'session_count': len(opencode_procs),
     }
 
 
 @app.get('/api/aider/status')
 def aider_status():
-    global aider_proc
-    running = aider_proc is not None and aider_proc.poll() is None
+    global aider_proc, aider_procs
+    aider_procs[:] = _prune_agent_procs(aider_procs, aider_proc)
+    running = len(aider_procs) > 0
+    latest_pid = aider_procs[-1]['pid'] if running else None
     cfg = sync_config()
     found_bin = cfg.get('agents', {}).get('aider')
     installed = bool(found_bin)
     return {
         'running': running,
-        'pid': aider_proc.pid if running else None,
+        'pid': latest_pid,
+        'session_count': len(aider_procs),
+        'active_sessions': [
+            {'pid': s['pid'], 'project_dir': s.get('project_dir', ''), 'started_at': s.get('started_at', '')}
+            for s in aider_procs
+        ],
         'installed': installed,
         'binary': found_bin if installed else None,
         'terminal': detect_terminal(),
@@ -1254,7 +1447,7 @@ def aider_status():
 @app.post('/api/aider/launch')
 def launch_aider(params: AiderLaunch):
     """Auto-start backend server if needed, then spawn aider in a terminal."""
-    global aider_proc, proc, log_handle
+    global aider_proc, aider_procs, proc, log_handle
 
     project = Path(params.project_dir).expanduser().resolve()
     if not project.is_dir():
@@ -1288,6 +1481,7 @@ def launch_aider(params: AiderLaunch):
         'last_alias': params.alias,
         'last_layers': params.layers,
         'last_context': params.context,
+        'last_parallel': params.parallel,
         'last_threads': params.threads,
         'last_threads_batch': params.threads_batch,
         'last_batch': params.batch,
@@ -1325,10 +1519,199 @@ def launch_aider(params: AiderLaunch):
         aider_cmd += f' --chat-history-file {params.history_file.strip()}'
 
     aider_proc = spawn_in_terminal(aider_cmd, cwd=project, title="Aider CLI")
+    aider_procs[:] = _prune_agent_procs(aider_procs)
+    aider_procs.append({
+        'pid': aider_proc.pid,
+        'proc': aider_proc,
+        'project_dir': str(project),
+        'started_at': datetime.now().isoformat(timespec='seconds'),
+    })
     return {
         'ok': True,
         'message': 'Aider CLI launching in terminal. Connecting to local server.',
         'terminal': terminal,
         'project_dir': str(project),
         'aider_pid': aider_proc.pid,
+        'session_count': len(aider_procs),
+    }
+
+
+_sequence_state: Dict[str, Any] = {
+    'running': False,
+    'last_run': None,
+}
+
+
+def run_parallel_sequence(req: SequenceRunRequest) -> Dict[str, Any]:
+    """Executes a fan-out / fan-in batch of prompts concurrently across active backend slots."""
+    active_info = runtime_state.get('active') or {}
+    st = load_settings()
+    slot_budget = int(active_info.get('parallel') or st.get('last_parallel', 1) or 1)
+    concurrency = max(1, min(32, int(req.max_concurrency) if req.max_concurrency > 0 else slot_budget))
+    alias = active_info.get('alias') or st.get('last_alias', 'llamacpp') or 'llamacpp'
+    default_temp = float(active_info.get('temp', st.get('last_temp', 0.2)))
+    api_key = get_current_api_key()
+
+    run_id = f"seq-{uuid.uuid4().hex[:8]}"
+    started_ts = time.time()
+    cancel_event = threading.Event()
+
+    _sequence_state['running'] = True
+    append_log(f"[SEQUENCE {run_id}] Starting {len(req.items)} tasks (concurrency={concurrency}, policy={req.join_policy})")
+
+    def _run_item(idx: int, item: SequenceTaskItem) -> Dict[str, Any]:
+        item_id = item.id.strip() or f"task-{idx + 1}"
+        t0 = time.time()
+        if cancel_event.is_set():
+            return {
+                'id': item_id,
+                'index': idx,
+                'status': 'cancelled',
+                'content': '',
+                'error': 'Cancelled by all_required fail-fast policy',
+                'latency_ms': 0,
+            }
+        messages = []
+        if item.system.strip():
+            messages.append({'role': 'system', 'content': item.system.strip()})
+        messages.append({'role': 'user', 'content': item.prompt})
+        payload = {
+            'model': alias,
+            'messages': messages,
+            'max_tokens': item.max_tokens,
+            'temperature': item.temp if item.temp is not None else default_temp,
+            'stream': False,
+        }
+        headers = {'Content-Type': 'application/json'}
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+        url = f'http://127.0.0.1:{PORT}/v1/chat/completions'
+        try:
+            http_req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode('utf-8'),
+                headers=headers,
+                method='POST',
+            )
+            with urllib.request.urlopen(http_req, timeout=req.timeout_sec) as resp:
+                body = json.loads(resp.read(10_000_000))
+            choices = body.get('choices') or []
+            msg = (choices[0].get('message') or {}) if choices else {}
+            content = msg.get('content') or (choices[0].get('text') if choices else '') or ''
+            usage = body.get('usage') or {}
+            return {
+                'id': item_id,
+                'index': idx,
+                'status': 'ok',
+                'content': content,
+                'usage': usage,
+                'error': None,
+                'latency_ms': int((time.time() - t0) * 1000),
+            }
+        except Exception as e:
+            if req.join_policy == 'all_required':
+                cancel_event.set()
+            return {
+                'id': item_id,
+                'index': idx,
+                'status': 'error',
+                'content': '',
+                'error': str(e),
+                'latency_ms': int((time.time() - t0) * 1000),
+            }
+
+    results: List[Optional[Dict[str, Any]]] = [None] * len(req.items)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+        future_map = {
+            pool.submit(_run_item, idx, item): idx
+            for idx, item in enumerate(req.items)
+        }
+        for fut in concurrent.futures.as_completed(future_map):
+            idx = future_map[fut]
+            try:
+                res = fut.result()
+            except Exception as e:
+                res = {
+                    'id': req.items[idx].id or f"task-{idx + 1}",
+                    'index': idx,
+                    'status': 'error',
+                    'content': '',
+                    'error': str(e),
+                    'latency_ms': 0,
+                }
+            results[idx] = res
+            if res['status'] == 'error' and req.join_policy == 'all_required':
+                cancel_event.set()
+                for pending_fut in future_map:
+                    if not pending_fut.done():
+                        pending_fut.cancel()
+
+    final_items: List[Dict[str, Any]] = []
+    ok_count = 0
+    err_count = 0
+    cancelled_count = 0
+    for idx, r in enumerate(results):
+        if r is None:
+            r = {
+                'id': req.items[idx].id or f"task-{idx + 1}",
+                'index': idx,
+                'status': 'cancelled',
+                'content': '',
+                'error': 'Cancelled before execution',
+                'latency_ms': 0,
+            }
+        if r['status'] == 'ok':
+            ok_count += 1
+        elif r['status'] == 'cancelled':
+            cancelled_count += 1
+        else:
+            err_count += 1
+        final_items.append(r)
+
+    if err_count == 0 and cancelled_count == 0:
+        verdict = 'completed'
+    elif req.join_policy == 'all_required':
+        verdict = 'contained_failure'
+    elif ok_count > 0:
+        verdict = 'degraded'
+    else:
+        verdict = 'failed'
+
+    total_ms = int((time.time() - started_ts) * 1000)
+    summary = {
+        'ok': verdict in ('completed', 'degraded'),
+        'run_id': run_id,
+        'verdict': verdict,
+        'join_policy': req.join_policy,
+        'concurrency': concurrency,
+        'total_items': len(final_items),
+        'succeeded': ok_count,
+        'failed': err_count,
+        'cancelled': cancelled_count,
+        'total_latency_ms': total_ms,
+        'completed_at': datetime.now().isoformat(timespec='seconds'),
+        'results': final_items,
+    }
+    _sequence_state['running'] = False
+    _sequence_state['last_run'] = summary
+    append_log(f"[SEQUENCE {run_id}] Verdict={verdict} (ok={ok_count}, err={err_count}, cancelled={cancelled_count}, {total_ms}ms)")
+    return summary
+
+
+@app.post('/api/sequence/run')
+def api_sequence_run(req: SequenceRunRequest):
+    """Runs a batch of prompts in parallel across active server slots."""
+    return run_parallel_sequence(req)
+
+
+@app.get('/api/sequence/status')
+def api_sequence_status():
+    """Returns current parallel sequence execution status and most recent run summary."""
+    active_info = runtime_state.get('active') or {}
+    st = load_settings()
+    return {
+        'running': _sequence_state['running'],
+        'parallel_slots': int(active_info.get('parallel') or st.get('last_parallel', 1) or 1),
+        'effective_context': int(active_info.get('effective_context') or st.get('last_context', 8192)),
+        'last_run': _sequence_state['last_run'],
     }

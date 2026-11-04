@@ -27,7 +27,11 @@ def detect_terminal() -> Optional[str]:
             return 'iTerm.app'
         return 'Terminal.app'
     else:
-        for term in ('gnome-terminal', 'xfce4-terminal', 'konsole', 'x-terminal-emulator', 'xterm'):
+        for term in (
+            'gnome-terminal', 'ptyxis', 'kgx', 'konsole', 'xfce4-terminal',
+            'tilix', 'mate-terminal', 'alacritty', 'kitty', 'wezterm',
+            'foot', 'ghostty', 'x-terminal-emulator', 'xterm'
+        ):
             if shutil.which(term):
                 return term
         return None
@@ -54,20 +58,50 @@ def spawn_in_terminal(command_str: str, cwd: Path, title: str = "llmCode") -> su
         return subprocess.Popen(args, cwd=cwd_str, shell=True)
 
     elif sys.platform == 'darwin':
-        escaped_cwd = cwd_str.replace('"', '\\"')
-        escaped_cmd = command_str.replace('"', '\\"')
-        script = f'tell application "Terminal"\nactivate\ndo script "cd \\"{escaped_cwd}\\" && {escaped_cmd}"\nend tell'
+        escaped_cwd = cwd_str.replace('\\', '\\\\').replace('"', '\\"')
+        escaped_cmd = command_str.replace('\\', '\\\\').replace('"', '\\"')
+        if terminal == 'iTerm.app':
+            script = (
+                'tell application "iTerm"\n'
+                'activate\n'
+                'set newWindow to (create window with default profile)\n'
+                'tell current session of newWindow\n'
+                f'write text "cd \\"{escaped_cwd}\\" && {escaped_cmd}"\n'
+                'end tell\n'
+                'end tell'
+            )
+        else:
+            script = f'tell application "Terminal"\nactivate\ndo script "cd \\"{escaped_cwd}\\" && {escaped_cmd}"\nend tell'
         return subprocess.Popen(['osascript', '-e', script],
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, start_new_session=True)
 
     else:
+        shell_payload = f'cd "{cwd_str}" && {command_str}; exec bash'
         if terminal == 'gnome-terminal':
-            term_args = ['gnome-terminal', '--', 'bash', '-c', f'cd "{cwd_str}" && {command_str}; exec bash']
-        elif terminal == 'xfce4-terminal':
-            term_args = ['xfce4-terminal', '-e', f'bash -c "cd \\"{cwd_str}\\" && {command_str}; exec bash"']
+            term_args = ['gnome-terminal', '--', 'bash', '-c', shell_payload]
+        elif terminal == 'ptyxis':
+            term_args = ['ptyxis', '--new-window', '--working-directory', cwd_str, '--', 'bash', '-c', f'{command_str}; exec bash']
+        elif terminal == 'kgx':
+            term_args = ['kgx', f'--working-directory={cwd_str}', '-e', f'bash -c "{command_str}; exec bash"']
         elif terminal == 'konsole':
             term_args = ['konsole', '--workdir', cwd_str, '-e', 'bash', '-c', f'{command_str}; exec bash']
+        elif terminal == 'xfce4-terminal':
+            term_args = ['xfce4-terminal', f'--working-directory={cwd_str}', '-e', f'bash -c "{command_str}; exec bash"']
+        elif terminal == 'tilix':
+            term_args = ['tilix', f'--working-directory={cwd_str}', '-e', f'bash -c "{command_str}; exec bash"']
+        elif terminal == 'mate-terminal':
+            term_args = ['mate-terminal', f'--working-directory={cwd_str}', '-e', f'bash -c "{command_str}; exec bash"']
+        elif terminal == 'alacritty':
+            term_args = ['alacritty', '--working-directory', cwd_str, '-e', 'bash', '-c', f'{command_str}; exec bash']
+        elif terminal == 'kitty':
+            term_args = ['kitty', '--directory', cwd_str, 'bash', '-c', f'{command_str}; exec bash']
+        elif terminal == 'wezterm':
+            term_args = ['wezterm', 'start', '--cwd', cwd_str, '--', 'bash', '-c', f'{command_str}; exec bash']
+        elif terminal == 'foot':
+            term_args = ['foot', f'--working-directory={cwd_str}', 'bash', '-c', f'{command_str}; exec bash']
+        elif terminal == 'ghostty':
+            term_args = ['ghostty', f'--working-directory={cwd_str}', '-e', 'bash', '-c', f'{command_str}; exec bash']
         elif terminal == 'x-terminal-emulator':
             term_args = ['x-terminal-emulator', '-e', f'bash -c "cd \\"{cwd_str}\\" && {command_str}; exec bash"']
         else:
@@ -168,15 +202,23 @@ def stop_all_services() -> dict:
         )
         subprocess.run(['powershell', '-NoProfile', '-Command', ps_cmd], capture_output=True)
     else:
+        my_pid = str(os.getpid())
         patterns = [
             ('llm-dash', 'uvicorn app:app'),
             ('llama-server', 'llama-server'),
-            ('koboldcpp', 'koboldcpp.py'),
+            ('koboldcpp', 'koboldcpp'),
+            ('ollama', 'ollama serve'),
         ]
         for label, pat in patterns:
             res = subprocess.run(['pgrep', '-f', pat], capture_output=True, text=True)
             if res.returncode == 0 and res.stdout.strip():
-                subprocess.run(['pkill', '-f', pat], capture_output=True)
-                stopped.append(label)
+                pids = [p.strip() for p in res.stdout.splitlines() if p.strip() and p.strip() != my_pid]
+                if pids:
+                    for pid in pids:
+                        try:
+                            os.kill(int(pid), signal.SIGTERM)
+                        except Exception:
+                            pass
+                    stopped.append(label)
 
     return {'stopped': stopped}

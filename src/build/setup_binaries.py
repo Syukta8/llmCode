@@ -35,6 +35,7 @@ from src.common.paths import (
     get_ollama_binary,
     get_platform_name,
     load_hardware,
+    parse_version_tuple,
     save_hardware,
     sync_config,
 )
@@ -116,6 +117,147 @@ def check_c_compiler() -> Tuple[bool, str]:
         return False, "Missing C++ compiler (g++ / clang++)"
 
 
+def _find_nvidia_smi() -> Optional[str]:
+    """Locates nvidia-smi across PATH and standard Windows/Linux driver directories."""
+    found = shutil.which('nvidia-smi')
+    if found:
+        return found
+    if os.name == 'nt':
+        win_candidates = [
+            Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'nvidia-smi.exe',
+            Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'NVIDIA Corporation' / 'NVSMI' / 'nvidia-smi.exe',
+        ]
+        for c in win_candidates:
+            if c.is_file():
+                return str(c)
+        driver_store = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'DriverStore' / 'FileRepository'
+        if driver_store.is_dir():
+            for p in sorted(driver_store.glob('nv*/nvidia-smi.exe'), reverse=True):
+                if p.is_file():
+                    return str(p)
+    else:
+        for p_str in ('/usr/bin/nvidia-smi', '/usr/local/nvidia/bin/nvidia-smi', '/opt/cuda/bin/nvidia-smi'):
+            if Path(p_str).is_file():
+                return p_str
+    return None
+
+
+def _find_nvcc() -> Optional[str]:
+    """Locates CUDA compiler (nvcc) across PATH, CUDA_PATH/CUDA_HOME, and Linux/Windows toolkit directories."""
+    found = shutil.which('nvcc')
+    if found:
+        return found
+    exe = get_executable_name('nvcc')
+    for env_key in ('CUDA_PATH', 'CUDA_HOME'):
+        env_val = os.environ.get(env_key, '').strip()
+        if env_val:
+            cand = Path(env_val) / 'bin' / exe
+            if cand.is_file():
+                return str(cand)
+    if os.name == 'nt':
+        cuda_base = Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'NVIDIA GPU Computing Toolkit' / 'CUDA'
+        if cuda_base.is_dir():
+            for p in sorted(cuda_base.glob(f'v*/bin/{exe}'), reverse=True):
+                if p.is_file():
+                    return str(p)
+    else:
+        for p_str in (
+            '/usr/local/cuda/bin/nvcc',
+            '/opt/cuda/bin/nvcc',
+            '/usr/lib/nvidia-cuda-toolkit/bin/nvcc',
+            '/usr/bin/nvcc',
+        ):
+            if Path(p_str).is_file():
+                return p_str
+        usr_local = Path('/usr/local')
+        if usr_local.is_dir():
+            for p in sorted(usr_local.glob('cuda-*/bin/nvcc'), reverse=True):
+                if p.is_file():
+                    return str(p)
+    return None
+
+
+def _detect_apple_silicon_p_cores() -> Optional[int]:
+    """Queries macOS sysctl hw.perflevel0.physicalcpu for Apple Silicon Performance core count."""
+    if get_platform_name() != 'macos':
+        return None
+    try:
+        res = subprocess.run(
+            ['sysctl', '-n', 'hw.perflevel0.physicalcpu'],
+            capture_output=True, text=True, timeout=2
+        )
+        if res.returncode == 0 and res.stdout.strip().isdigit():
+            val = int(res.stdout.strip())
+            if val > 0:
+                return val
+    except Exception:
+        pass
+    return None
+
+
+def _strip_macos_quarantine(target_path: Path) -> None:
+    """Removes macOS Gatekeeper com.apple.quarantine attributes and sets 0o755 on binaries/dylibs."""
+    if get_platform_name() != 'macos' or not target_path.exists():
+        return
+    try:
+        subprocess.run(['xattr', '-cr', str(target_path)], capture_output=True, timeout=5)
+    except Exception:
+        pass
+    try:
+        if target_path.is_file():
+            target_path.chmod(0o755)
+        elif target_path.is_dir():
+            for p in target_path.rglob('*'):
+                if p.is_file() and (p.suffix in ('.dylib', '.so') or 'llama-' in p.name or p.name in ('koboldcpp', 'ollama', 'opencode')):
+                    try:
+                        p.chmod(0o755)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
+def _detect_windows_gpu_wmi() -> Optional[Dict[str, Any]]:
+    """Queries Windows Win32_VideoController via PowerShell CIM as a fallback when nvidia-smi is unavailable."""
+    if os.name != 'nt':
+        return None
+    ps_bin = shutil.which('powershell') or shutil.which('pwsh')
+    if not ps_bin:
+        return None
+    try:
+        cmd = [
+            ps_bin, '-NoProfile', '-NonInteractive', '-Command',
+            'Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM,DriverVersion | ConvertTo-Json -Compress'
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=6)
+        if res.returncode == 0 and res.stdout.strip():
+            raw = json.loads(res.stdout.strip())
+            controllers = raw if isinstance(raw, list) else [raw]
+            for ctrl in controllers:
+                if not isinstance(ctrl, dict):
+                    continue
+                name = str(ctrl.get('Name') or '').strip()
+                if 'nvidia' in name.lower():
+                    adapter_ram = int(ctrl.get('AdapterRAM') or 0)
+                    vram_mb = adapter_ram // (1024 * 1024) if adapter_ram > 0 else 0
+                    # WMI AdapterRAM is a 32-bit uint that caps at 4095 MB on >=4GB GPUs
+                    if vram_mb <= 0 or vram_mb >= 4095:
+                        vram_mb = max(vram_mb, 8192)
+                    return {
+                        'available': True,
+                        'acceleration': 'cuda',
+                        'name': name,
+                        'vram_mb': vram_mb,
+                        'count': 1,
+                        'compute_capability': '',
+                        'cuda_arch': '',
+                        'driver_version': str(ctrl.get('DriverVersion') or '').strip(),
+                    }
+    except Exception:
+        pass
+    return None
+
+
 def detect_gpu_acceleration() -> str:
     """
     Auto-detects available hardware acceleration:
@@ -126,14 +268,20 @@ def detect_gpu_acceleration() -> str:
     plat = get_platform_name()
     if plat == 'macos':
         return 'metal'
-    if shutil.which('nvidia-smi') or shutil.which('nvcc'):
-        try:
-            res = subprocess.run(['nvidia-smi', '-L'], capture_output=True, text=True, timeout=4)
-            if res.returncode == 0 and 'GPU' in res.stdout:
-                return 'cuda'
-        except Exception:
-            if shutil.which('nvcc'):
-                return 'cuda'
+    smi_bin = _find_nvidia_smi()
+    nvcc_bin = _find_nvcc()
+    if smi_bin or nvcc_bin:
+        if smi_bin:
+            try:
+                res = subprocess.run([smi_bin, '-L'], capture_output=True, text=True, timeout=5)
+                if res.returncode == 0 and 'GPU' in res.stdout:
+                    return 'cuda'
+            except Exception:
+                pass
+        if nvcc_bin:
+            return 'cuda'
+    if plat == 'windows' and _detect_windows_gpu_wmi():
+        return 'cuda'
     return 'cpu'
 
 
@@ -205,32 +353,56 @@ def _detect_gpu_details() -> Dict[str, Any]:
         })
         return info
 
-    if shutil.which('nvidia-smi'):
+    smi_bin = _find_nvidia_smi()
+    if smi_bin:
         try:
             res = subprocess.run(
-                ['nvidia-smi', '--query-gpu=name,memory.total,compute_cap,driver_version', '--format=csv,noheader,nounits'],
-                capture_output=True, text=True, timeout=4
+                [smi_bin, '--query-gpu=name,memory.total,compute_cap,driver_version', '--format=csv,noheader,nounits'],
+                capture_output=True, text=True, timeout=5
             )
+            has_cc_col = True
+            if res.returncode != 0 or not res.stdout.strip():
+                has_cc_col = False
+                res = subprocess.run(
+                    [smi_bin, '--query-gpu=name,memory.total,driver_version', '--format=csv,noheader,nounits'],
+                    capture_output=True, text=True, timeout=5
+                )
             if res.returncode == 0 and res.stdout.strip():
                 lines = [ln.strip() for ln in res.stdout.strip().splitlines() if ln.strip()]
                 parts = [x.strip() for x in lines[0].split(',')]
-                name = parts[0] if len(parts) > 0 else 'NVIDIA GPU'
-                vram = int(float(parts[1])) if len(parts) > 1 and parts[1].replace('.', '').isdigit() else 0
-                cc = parts[2] if len(parts) > 2 else ''
-                drv = parts[3] if len(parts) > 3 else ''
-                cuda_arch = cc.replace('.', '') if cc and re.match(r'^\d+\.\d+$', cc) else ''
+                name = parts[0] if len(parts) > 0 and parts[0] else 'NVIDIA GPU'
+                vram = 0
+                if len(parts) > 1:
+                    m_vram = re.search(r'(\d+(?:\.\d+)?)', parts[1])
+                    if m_vram:
+                        vram = int(float(m_vram.group(1)))
+                if has_cc_col:
+                    raw_cc = parts[2] if len(parts) > 2 else ''
+                    drv = parts[3] if len(parts) > 3 else ''
+                else:
+                    raw_cc = ''
+                    drv = parts[2] if len(parts) > 2 else ''
+                cc = raw_cc if re.match(r'^\d+\.\d+$', raw_cc) else ''
+                cuda_arch = cc.replace('.', '') if cc else ''
                 info.update({
                     'available': True,
                     'acceleration': 'cuda',
                     'name': name,
-                    'vram_mb': vram,
+                    'vram_mb': vram if vram > 0 else 8192,
                     'count': len(lines),
                     'compute_capability': cc,
                     'cuda_arch': cuda_arch,
                     'driver_version': drv,
                 })
+                return info
         except Exception:
             pass
+
+    if plat == 'windows':
+        wmi_gpu = _detect_windows_gpu_wmi()
+        if wmi_gpu:
+            info.update(wmi_gpu)
+            return info
     return info
 
 
@@ -242,10 +414,11 @@ def scan_and_save_hardware() -> Dict[str, Any]:
     """
     plat = get_platform_name()
     cpu_cores = os.cpu_count() or 4
+    p_cores = _detect_apple_silicon_p_cores() if plat == 'macos' else None
     ram_mb = _detect_ram_mb()
     gpu = _detect_gpu_details()
     has_cc, cc_detail = check_c_compiler()
-    nvcc_path = shutil.which('nvcc') or ('/usr/local/cuda/bin/nvcc' if Path('/usr/local/cuda/bin/nvcc').is_file() else None)
+    nvcc_path = _find_nvcc()
 
     packages = {
         'git': {'installed': bool(shutil.which('git')), 'path': shutil.which('git')},
@@ -259,36 +432,44 @@ def scan_and_save_hardware() -> Dict[str, Any]:
         'curl': {'installed': bool(shutil.which('curl')), 'path': shutil.which('curl')},
     }
 
-    # Auto-tune runtime settings based on detected VRAM / RAM & CPU cores
+    # Auto-tune runtime settings based on detected VRAM / RAM & CPU cores (using P-cores on Apple Silicon)
     vram_mb = gpu.get('vram_mb', 0)
-    opt_threads = max(2, min(32, cpu_cores // 2 if cpu_cores >= 8 else max(2, cpu_cores - 1)))
+    if p_cores:
+        opt_threads = max(2, min(32, p_cores))
+    else:
+        opt_threads = max(2, min(32, cpu_cores // 2 if cpu_cores >= 8 else max(2, cpu_cores - 1)))
     opt_threads_batch = max(opt_threads, min(64, cpu_cores - 2 if cpu_cores >= 8 else cpu_cores))
 
     if gpu['available']:
         if vram_mb >= 20000:      # 24GB+ (e.g. RTX 3090/4090/5090 or 32GB+ Mac)
             opt_layers = 99
             opt_context = 32768
+            opt_parallel = 4
             opt_batch = 4096
             opt_ubatch = 512
         elif vram_mb >= 11000:    # 12GB - 16GB
             opt_layers = 48
             opt_context = 16384
+            opt_parallel = 2
             opt_batch = 2048
             opt_ubatch = 512
         elif vram_mb >= 7000:     # 8GB
             opt_layers = 32
             opt_context = 16384
+            opt_parallel = 2
             opt_batch = 2048
             opt_ubatch = 256
         else:                     # <= 6GB (e.g. 3GB - 4GB GTX 1050)
             opt_layers = 8
             opt_context = 8192
+            opt_parallel = 1
             opt_batch = 2048
             opt_ubatch = 256
         opt_flash_attn = 'on'
     else:
         opt_layers = 0
         opt_context = 8192 if ram_mb >= 16000 else 4096
+        opt_parallel = 1
         opt_batch = 1024
         opt_ubatch = 256
         opt_flash_attn = 'off'
@@ -299,6 +480,7 @@ def scan_and_save_hardware() -> Dict[str, Any]:
     if gpu['acceleration'] == 'cuda' and nvcc_path:
         llama_cmake_flags.extend([
             '-DGGML_CUDA=ON',
+            f'-DCMAKE_CUDA_COMPILER={nvcc_path}',
             '-DGGML_CUDA_FORCE_MMQ=ON',
             '-DGGML_CUDA_FA_ALL_QUANTS=ON',
         ])
@@ -334,6 +516,7 @@ def scan_and_save_hardware() -> Dict[str, Any]:
         'runtime_defaults': {
             'layers': opt_layers,
             'context': opt_context,
+            'parallel': opt_parallel,
             'threads': opt_threads,
             'threads_batch': opt_threads_batch,
             'batch': opt_batch,
@@ -515,7 +698,7 @@ def inspect_requirements(needs_llama_src: bool, needs_kobold_src: bool, needs_ol
         })
 
     if accel == 'cuda':
-        nvcc_bin = shutil.which('nvcc') or (Path('/usr/local/cuda/bin/nvcc').is_file() and '/usr/local/cuda/bin/nvcc')
+        nvcc_bin = _find_nvcc()
         reqs.append({
             'name': 'cuda-toolkit (nvcc)',
             'found': bool(nvcc_bin),
@@ -636,20 +819,25 @@ def compile_llama_cpp(accel: str) -> bool:
     build_cmd = ['cmake', '--build', str(build_dir), '--config', 'Release', '--target', 'llama-server', '-j', jobs]
 
     print(f"Compiling llama.cpp with hardware flags: {' '.join(cmake_flags)} (-j {jobs})")
+    env = dict(os.environ)
+    nvcc_bin = _find_nvcc()
+    if nvcc_bin:
+        nvcc_dir = str(Path(nvcc_bin).parent)
+        env['PATH'] = nvcc_dir + os.pathsep + env.get('PATH', '')
     try:
         if os.name == 'nt':
             msvc = find_windows_msvc()
             if msvc and msvc != 'PATH':
                 cfg_line = f'call "{msvc}" && ' + ' '.join(f'"{a}"' if ' ' in a else a for a in cmake_args)
                 bld_line = f'call "{msvc}" && ' + ' '.join(f'"{a}"' if ' ' in a else a for a in build_cmd)
-                subprocess.run(cfg_line, shell=True, check=True)
-                subprocess.run(bld_line, shell=True, check=True)
+                subprocess.run(cfg_line, shell=True, check=True, env=env)
+                subprocess.run(bld_line, shell=True, check=True, env=env)
             else:
-                subprocess.run(cmake_args, check=True)
-                subprocess.run(build_cmd, check=True)
+                subprocess.run(cmake_args, check=True, env=env)
+                subprocess.run(build_cmd, check=True, env=env)
         else:
-            subprocess.run(cmake_args, check=True)
-            subprocess.run(build_cmd, check=True)
+            subprocess.run(cmake_args, check=True, env=env)
+            subprocess.run(build_cmd, check=True, env=env)
         print(f"llama.cpp compiled successfully in {build_dir}")
         return True
     except Exception as e:
@@ -658,7 +846,12 @@ def compile_llama_cpp(accel: str) -> bool:
 
 
 def download_prebuilt_llama_cpp(accel: str) -> bool:
-    """Downloads official prebuilt llama.cpp release archive from GitHub for Windows, macOS, or Linux."""
+    """Downloads official prebuilt llama.cpp release archive from GitHub for Windows, macOS, or Linux.
+    On Windows with CUDA, downloads BOTH the llama CUDA binary archive AND the mandatory
+    cudart-llama companion archive so cublas64/cudart64 DLLs are present alongside llama-server.exe.
+    On Linux, prefers CUDA/Vulkan prebuilt archives when accel == 'cuda', falling back to standard x64.
+    On macOS, strips Gatekeeper com.apple.quarantine attributes after extraction.
+    """
     plat = get_platform_name()
     dest_dir = BIN_DIR / plat
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -674,24 +867,34 @@ def download_prebuilt_llama_cpp(accel: str) -> bool:
 
     assets = release_data.get('assets', [])
     target_asset = None
+    cudart_asset = None
+    linux_fallback_asset = None
 
     for asset in assets:
         name = asset.get('name', '').lower()
         if plat == 'windows' and ('bin-win' in name or '-win' in name) and ('x64' in name or 'amd64' in name):
             if accel == 'cuda' and ('cuda' in name or 'cu12' in name or 'cu11' in name):
-                target_asset = asset
-                break
-            elif accel != 'cuda' and ('avx2' in name or 'vulkan' in name or 'x64' in name):
-                target_asset = asset
-                break
+                if name.startswith('cudart-'):
+                    if not cudart_asset:
+                        cudart_asset = asset
+                elif not target_asset:
+                    target_asset = asset
+            elif accel != 'cuda' and not name.startswith('cudart-') and ('avx2' in name or 'cpu' in name or 'vulkan' in name or 'x64' in name):
+                if not target_asset:
+                    target_asset = asset
         elif plat == 'macos' and ('bin-macos' in name or '-macos' in name or '-darwin' in name):
             arch = 'arm64' if platform.machine().lower() in ('arm64', 'aarch64') else 'x64'
-            if arch in name:
+            if arch in name and not target_asset:
                 target_asset = asset
-                break
         elif plat == 'linux' and ('bin-ubuntu' in name or 'bin-linux' in name or '-linux' in name) and ('x64' in name or 'amd64' in name):
-            target_asset = asset
-            break
+            if accel == 'cuda' and ('cuda' in name or 'vulkan' in name):
+                if not target_asset:
+                    target_asset = asset
+            elif not linux_fallback_asset:
+                linux_fallback_asset = asset
+
+    if plat == 'linux' and not target_asset and linux_fallback_asset:
+        target_asset = linux_fallback_asset
 
     if not target_asset:
         # Fallback to direct well-known GitHub release artifact URLs
@@ -706,29 +909,55 @@ def download_prebuilt_llama_cpp(accel: str) -> bool:
             'browser_download_url': f"https://github.com/ggml-org/llama.cpp/releases/latest/download/{asset_name}"
         }
 
-    archive_path = dest_dir / target_asset['name']
-    try:
-        download_file(target_asset['browser_download_url'], archive_path)
-    except Exception as e:
-        print(f"Failed to download prebuilt llama.cpp ({target_asset['browser_download_url']}): {e}")
+    if plat == 'windows' and accel == 'cuda' and not cudart_asset:
+        cudart_name = 'cudart-llama-bin-win-cuda-12.4-x64.zip'
+        cudart_asset = {
+            'name': cudart_name,
+            'browser_download_url': f"https://github.com/ggml-org/llama.cpp/releases/latest/download/{cudart_name}"
+        }
+
+    # Clean stale DLLs/binaries in dest_dir before extracting so switching CPU -> CUDA replaces ggml DLLs cleanly
+    for stale in list(dest_dir.glob('*.dll')) + list(dest_dir.glob('*.so*')) + list(dest_dir.glob('*.dylib')) + list(dest_dir.glob('llama-*')):
+        if stale.is_file() or stale.is_symlink():
+            stale.unlink(missing_ok=True)
+
+    def _download_and_extract(asset_obj: Dict[str, Any]) -> bool:
+        archive_path = dest_dir / asset_obj['name']
+        try:
+            download_file(asset_obj['browser_download_url'], archive_path)
+        except Exception as e:
+            print(f"Failed to download {asset_obj['browser_download_url']}: {e}")
+            return False
+        try:
+            if archive_path.name.endswith('.zip'):
+                with zipfile.ZipFile(archive_path, 'r') as zf:
+                    zf.extractall(dest_dir)
+            elif archive_path.name.endswith(('.tar.gz', '.tgz')):
+                with tarfile.open(archive_path, 'r:gz') as tf:
+                    tf.extractall(dest_dir)
+            return True
+        finally:
+            archive_path.unlink(missing_ok=True)
+
+    if cudart_asset:
+        print(f"Downloading companion CUDA runtime DLLs ({cudart_asset['name']})...")
+        _download_and_extract(cudart_asset)
+
+    if not _download_and_extract(target_asset):
         return False
 
-    if archive_path.name.endswith('.zip'):
-        with zipfile.ZipFile(archive_path, 'r') as zf:
-            zf.extractall(dest_dir)
-    elif archive_path.name.endswith(('.tar.gz', '.tgz')):
-        with tarfile.open(archive_path, 'r:gz') as tf:
-            tf.extractall(dest_dir)
-    archive_path.unlink(missing_ok=True)
+    if os.name != 'nt':
+        for pattern in ('llama-*', '*.so*', '*.dylib'):
+            for p in dest_dir.rglob(pattern):
+                if p.is_file() and not p.is_symlink():
+                    try:
+                        p.chmod(0o755)
+                    except Exception:
+                        pass
+    _strip_macos_quarantine(dest_dir)
 
-    exe_name = get_executable_name('llama-server')
-    for p in dest_dir.rglob(exe_name):
-        if p.is_file():
-            if os.name != 'nt':
-                p.chmod(0o755)
-            break
-
-    print(f"Prebuilt llama.cpp installed in {dest_dir}")
+    (dest_dir / 'llama_cpp.flavor').write_text(accel + '\n', encoding='utf-8')
+    print(f"Prebuilt llama.cpp ({accel}) installed in {dest_dir}")
     return True
 
 
@@ -743,6 +972,12 @@ def compile_koboldcpp(accel: str) -> bool:
         print(f"Cloning KoboldCpp into {src_dir} ...")
         subprocess.run(['git', 'clone', '--depth', '1', 'https://github.com/LostRuins/koboldcpp.git', str(src_dir)], check=True)
 
+    env = dict(os.environ)
+    nvcc_bin = _find_nvcc()
+    if nvcc_bin:
+        nvcc_dir = str(Path(nvcc_bin).parent)
+        env['PATH'] = nvcc_dir + os.pathsep + env.get('PATH', '')
+
     plat = get_platform_name()
     if plat == 'windows':
         build_dir = src_dir / 'build'
@@ -754,6 +989,8 @@ def compile_koboldcpp(accel: str) -> bool:
             cmake_args.extend(['-G', 'Ninja'])
         if accel == 'cuda':
             cmake_args.append('-DLLAMA_CUBLAS=ON')
+            if nvcc_bin:
+                cmake_args.append(f'-DCMAKE_CUDA_COMPILER={nvcc_bin}')
 
         jobs = str(hw.get('build_config', {}).get('parallel_jobs', 4))
         build_cmd = ['cmake', '--build', str(build_dir), '--config', 'Release', '-j', jobs]
@@ -763,11 +1000,11 @@ def compile_koboldcpp(accel: str) -> bool:
             if msvc and msvc != 'PATH':
                 cfg_line = f'call "{msvc}" && ' + ' '.join(f'"{a}"' if ' ' in a else a for a in cmake_args)
                 bld_line = f'call "{msvc}" && ' + ' '.join(f'"{a}"' if ' ' in a else a for a in build_cmd)
-                subprocess.run(cfg_line, shell=True, check=True)
-                subprocess.run(bld_line, shell=True, check=True)
+                subprocess.run(cfg_line, shell=True, check=True, env=env)
+                subprocess.run(bld_line, shell=True, check=True, env=env)
             else:
-                subprocess.run(cmake_args, check=True)
-                subprocess.run(build_cmd, check=True)
+                subprocess.run(cmake_args, check=True, env=env)
+                subprocess.run(build_cmd, check=True, env=env)
             print(f"KoboldCpp compiled successfully in {src_dir}")
             return True
         except Exception as e:
@@ -779,7 +1016,7 @@ def compile_koboldcpp(accel: str) -> bool:
         make_cmd = ['make', '-C', str(src_dir), f'-j{jobs}'] + make_flags
         print(f"Compiling KoboldCpp with hardware flags: {' '.join(make_flags)} (-j {jobs})")
         try:
-            subprocess.run(make_cmd, check=True)
+            subprocess.run(make_cmd, check=True, env=env)
             print(f"KoboldCpp compiled successfully in {src_dir}")
             return True
         except Exception as e:
@@ -788,10 +1025,13 @@ def compile_koboldcpp(accel: str) -> bool:
 
 
 def download_prebuilt_koboldcpp(accel: str) -> bool:
-    """Downloads official standalone KoboldCpp binary from GitHub releases into bin/."""
+    """Downloads official standalone KoboldCpp binary from GitHub releases into bin/<platform>/ and bin/."""
     plat = get_platform_name()
     exe_name = get_executable_name('koboldcpp')
-    dest = BIN_DIR / exe_name
+    plat_dir = BIN_DIR / plat
+    plat_dir.mkdir(parents=True, exist_ok=True)
+    dest = plat_dir / exe_name
+    legacy_dest = BIN_DIR / exe_name
 
     if plat == 'windows':
         asset_name = 'koboldcpp.exe' if accel == 'cuda' else 'koboldcpp_nocuda.exe'
@@ -802,9 +1042,13 @@ def download_prebuilt_koboldcpp(accel: str) -> bool:
 
     url = f"https://github.com/LostRuins/koboldcpp/releases/latest/download/{asset_name}"
     try:
+        if legacy_dest.is_file() or legacy_dest.is_symlink():
+            legacy_dest.unlink(missing_ok=True)
         download_file(url, dest)
         if os.name != 'nt':
             dest.chmod(0o755)
+        _strip_macos_quarantine(dest)
+        (plat_dir / 'koboldcpp.flavor').write_text(accel + '\n', encoding='utf-8')
         return True
     except Exception as e:
         print(f"Failed to download prebuilt KoboldCpp ({url}): {e}")
@@ -822,16 +1066,24 @@ def compile_ollama(accel: str) -> bool:
         print(f"Cloning Ollama into {src_dir} ...")
         subprocess.run(['git', 'clone', '--depth', '1', 'https://github.com/ollama/ollama.git', str(src_dir)], check=True)
 
+    env = dict(os.environ)
+    nvcc_bin = _find_nvcc()
+    if nvcc_bin:
+        nvcc_dir = str(Path(nvcc_bin).parent)
+        env['PATH'] = nvcc_dir + os.pathsep + env.get('PATH', '')
+
     exe_name = get_executable_name('ollama')
     jobs = str(hw.get('build_config', {}).get('parallel_jobs', 4))
     try:
         if (src_dir / 'CMakeLists.txt').is_file() and shutil.which('cmake'):
             cmake_cmd = ['cmake', '-S', str(src_dir), '-B', str(src_dir / 'build'), '-DCMAKE_BUILD_TYPE=Release']
+            if nvcc_bin:
+                cmake_cmd.append(f"-DCMAKE_CUDA_COMPILER={nvcc_bin}")
             if hw['gpu'].get('cuda_arch'):
                 cmake_cmd.append(f"-DCMAKE_CUDA_ARCHITECTURES={hw['gpu']['cuda_arch']}")
-            subprocess.run(cmake_cmd, check=True)
-            subprocess.run(['cmake', '--build', str(src_dir / 'build'), '-j', jobs], check=True)
-        subprocess.run(['go', 'build', '-o', str(src_dir / exe_name), '.'], cwd=str(src_dir), check=True)
+            subprocess.run(cmake_cmd, check=True, env=env)
+            subprocess.run(['cmake', '--build', str(src_dir / 'build'), '-j', jobs], check=True, env=env)
+        subprocess.run(['go', 'build', '-o', str(src_dir / exe_name), '.'], cwd=str(src_dir), check=True, env=env)
         print(f"Ollama compiled successfully at {src_dir / exe_name}")
         return True
     except Exception as e:
@@ -840,10 +1092,12 @@ def compile_ollama(accel: str) -> bool:
 
 
 def download_prebuilt_ollama() -> bool:
-    """Downloads official prebuilt Ollama binary distribution into bin/ollama_dist or bin/."""
+    """Downloads official prebuilt Ollama binary distribution into bin/<platform>/ and bin/ollama_dist."""
     plat = get_platform_name()
     dist_dir = BIN_DIR / 'ollama_dist'
     dist_dir.mkdir(parents=True, exist_ok=True)
+    plat_dir = BIN_DIR / plat
+    plat_dir.mkdir(parents=True, exist_ok=True)
 
     if plat == 'windows':
         url = "https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip"
@@ -851,7 +1105,7 @@ def download_prebuilt_ollama() -> bool:
         try:
             download_file(url, archive)
             with zipfile.ZipFile(archive, 'r') as zf:
-                zf.extractall(BIN_DIR / 'windows')
+                zf.extractall(plat_dir)
             archive.unlink(missing_ok=True)
             return True
         except Exception as e:
@@ -864,12 +1118,24 @@ def download_prebuilt_ollama() -> bool:
         try:
             download_file(url, archive)
             with tarfile.open(archive, 'r:gz') as tf:
-                tf.extractall(BIN_DIR)
+                tf.extractall(dist_dir)
             archive.unlink(missing_ok=True)
-            ollama_bin = BIN_DIR / 'ollama'
-            if ollama_bin.is_file():
-                ollama_bin.chmod(0o755)
-            return True
+            extracted_bin = dist_dir / 'ollama'
+            if not extracted_bin.is_file():
+                app_bin = dist_dir / 'Ollama.app' / 'Contents' / 'Resources' / 'ollama'
+                if app_bin.is_file():
+                    extracted_bin = app_bin
+            target_bin = plat_dir / 'ollama'
+            if extracted_bin.is_file():
+                shutil.copy2(extracted_bin, target_bin)
+                target_bin.chmod(0o755)
+                _strip_macos_quarantine(target_bin)
+                link_path = BIN_DIR / 'ollama'
+                if link_path.exists() or link_path.is_symlink():
+                    link_path.unlink(missing_ok=True)
+                link_path.symlink_to(target_bin)
+                return True
+            return False
         except Exception as e:
             print(f"Failed to download macOS Ollama: {e}")
             return False
@@ -886,10 +1152,10 @@ def download_prebuilt_ollama() -> bool:
             bin_path = dist_dir / 'bin' / 'ollama'
             if bin_path.is_file():
                 bin_path.chmod(0o755)
-                link_path = BIN_DIR / 'ollama'
-                if link_path.exists() or link_path.is_symlink():
-                    link_path.unlink(missing_ok=True)
-                link_path.symlink_to(bin_path)
+                for link_path in (BIN_DIR / 'ollama', plat_dir / 'ollama'):
+                    if link_path.exists() or link_path.is_symlink():
+                        link_path.unlink(missing_ok=True)
+                    link_path.symlink_to(bin_path)
             return True
         except Exception as e:
             print(f"Failed to download Linux Ollama: {e}")
@@ -899,20 +1165,27 @@ def download_prebuilt_ollama() -> bool:
 # ==============================================================================
 # CLI Agents: Aider & OpenCode (Installed directly inside llm-dash .venv)
 # ==============================================================================
-def is_binary_runnable(bin_path: Path) -> bool:
-    """Verifies that an executable binary can run and executes without missing dynamic linkers."""
+def is_binary_runnable(bin_path: Path, min_version: Tuple[int, int, int] = (0, 0, 0)) -> bool:
+    """Verifies that an executable binary can run and optionally meets min_version."""
     try:
-        res = subprocess.run([str(bin_path), '--version'], capture_output=True, timeout=5)
-        return res.returncode == 0
+        res = subprocess.run([str(bin_path), '--version'], capture_output=True, text=True, timeout=5)
+        if res.returncode != 0:
+            return False
+        if min_version > (0, 0, 0):
+            ver_out = (res.stdout or '') + (res.stderr or '')
+            ver = parse_version_tuple(ver_out)
+            if ver != (0, 0, 0) and ver < min_version:
+                return False
+        return True
     except Exception:
         return False
 
 
 def _install_opencode_into_venv(venv_dir: Path) -> bool:
     """
-    Installs OpenCode CLI directly inside the llm-dash virtualenv
-    (`.venv/bin/opencode` on Linux/macOS or `.venv/Scripts/opencode.exe` on Windows).
-    Prioritizes local npm installation scoped to .venv, falling back to GitHub release binary.
+    Installs OpenCode v2 CLI (`opencode-ai@latest`, >= 1.0 architecture) directly inside the
+    llm-dash virtualenv (`.venv/bin/opencode` on Linux/macOS or `.venv/Scripts/opencode.cmd` on Windows).
+    Purges legacy v1 (`~/.opencode` or `< 1.0.0`) binaries and prioritizes npm `opencode-ai@latest`.
     """
     plat = get_platform_name()
     venv_bin_dir = venv_dir / ('Scripts' if os.name == 'nt' else 'bin')
@@ -920,21 +1193,25 @@ def _install_opencode_into_venv(venv_dir: Path) -> bool:
     exe_name = get_executable_name('opencode')
     target_bin = venv_bin_dir / exe_name
 
+    # Purge legacy v1 ~/.opencode installation directory if present
+    legacy_opencode_dir = Path.home() / '.opencode'
+    if legacy_opencode_dir.is_dir():
+        shutil.rmtree(legacy_opencode_dir, ignore_errors=True)
+
     if target_bin.is_file() or target_bin.is_symlink():
-        if is_binary_runnable(target_bin):
-            print(f"OpenCode CLI already present and runnable in venv at {target_bin}")
+        if is_binary_runnable(target_bin, min_version=(1, 0, 0)):
+            print(f"OpenCode v2 CLI already present and runnable in venv at {target_bin}")
             return True
-        print(f"Existing OpenCode binary at {target_bin} failed execution test; reinstalling...")
+        print(f"Existing OpenCode binary at {target_bin} is legacy v1 or failed check; upgrading to OpenCode v2...")
         target_bin.unlink(missing_ok=True)
 
-    # 1. Primary: install via npm scoped to venv_dir (`npm install --prefix <venv_dir> opencode-ai`)
+    # 1. Primary: install OpenCode v2 via npm scoped to venv_dir (`npm install --prefix <venv_dir> opencode-ai@latest`)
     if shutil.which('npm'):
-        print(f"Installing OpenCode CLI into {venv_dir} via npm (opencode-ai)...")
+        print(f"Installing OpenCode v2 CLI into {venv_dir} via npm (opencode-ai@latest)...")
         try:
-            subprocess.run(['npm', 'install', '--prefix', str(venv_dir), 'opencode-ai'], check=True)
+            subprocess.run(['npm', 'install', '--prefix', str(venv_dir), 'opencode-ai@latest'], check=True)
             npm_bin = venv_dir / 'node_modules' / '.bin' / ('opencode.cmd' if os.name == 'nt' else 'opencode')
             installed_pkg_bin = venv_dir / 'node_modules' / 'opencode-ai' / 'bin' / exe_name
-            # Fallback for npm structure if node_modules/opencode-ai/bin has opencode.exe or opencode
             if not installed_pkg_bin.is_file() and (venv_dir / 'node_modules' / 'opencode-ai' / 'bin' / 'opencode.exe').is_file():
                 installed_pkg_bin = venv_dir / 'node_modules' / 'opencode-ai' / 'bin' / 'opencode.exe'
 
@@ -943,6 +1220,7 @@ def _install_opencode_into_venv(venv_dir: Path) -> bool:
                 if os.name == 'nt':
                     wrapper = venv_bin_dir / 'opencode.cmd'
                     wrapper.write_text(f'@echo off\r\n"{src_bin}" %*\r\n', encoding='utf-8')
+                    check_target = wrapper
                 else:
                     if target_bin.exists() or target_bin.is_symlink():
                         target_bin.unlink(missing_ok=True)
@@ -951,8 +1229,9 @@ def _install_opencode_into_venv(venv_dir: Path) -> bool:
                         src_bin.chmod(0o755)
                     except Exception:
                         pass
-                if is_binary_runnable(target_bin):
-                    print(f"OpenCode installed and verified in venv via npm ({src_bin}).")
+                    check_target = target_bin
+                if is_binary_runnable(check_target, min_version=(1, 0, 0)):
+                    print(f"OpenCode v2 installed and verified in venv via npm ({src_bin}).")
                     return True
         except Exception as e:
             print(f"Warning: venv npm install failed: {e}")
@@ -1012,6 +1291,7 @@ def _install_opencode_into_venv(venv_dir: Path) -> bool:
                     shutil.move(str(p), str(target_bin))
                     if os.name != 'nt':
                         target_bin.chmod(0o755)
+                    _strip_macos_quarantine(target_bin)
                     break
             shutil.rmtree(extract_tmp, ignore_errors=True)
             if target_bin.is_file() and is_binary_runnable(target_bin):
