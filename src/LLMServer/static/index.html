@@ -367,6 +367,14 @@
     <button class="subtle" onclick="$('keyRotatedBanner').style.display='none'" style="padding:2px 8px; font-size:11px;">Dismiss</button>
   </div>
 
+  <div id="mtpAdvisoryBanner" style="display:none; background:rgba(245,158,11,0.12); border:1px solid rgba(245,158,11,0.45); color:#fcd34d; padding:10px 14px; border-radius:8px; margin-bottom:14px; font-size:12.5px; align-items:center; justify-content:space-between; gap:12px;">
+    <div id="mtpAdvisoryText" style="line-height:1.45;"></div>
+    <div style="display:flex; gap:6px; flex-shrink:0;">
+      <button class="primary" type="button" onclick="optimizeForVramAndMtp()" style="padding:4px 10px; font-size:11px;">Optimize for GPU &amp; MTP</button>
+      <button class="subtle" type="button" onclick="$('mtpAdvisoryBanner').style.display='none'" style="padding:4px 8px; font-size:11px;">Dismiss</button>
+    </div>
+  </div>
+
   <!-- Primary Model & Engine Deploy Card -->
   <div class="card">
     <div class="card-header">
@@ -379,9 +387,9 @@
 
     <div class="form-grid" style="margin-bottom: 16px;">
       <div class="field" style="grid-column: span 2;">
-        <label>Selected GGUF Model</label>
+        <label>Selected GGUF Model <span id="modelMetaBadges" style="display:inline-flex; gap:6px; margin-left:6px;"></span></label>
         <div style="display: flex; gap: 8px;">
-          <select id="chosenModel" class="mono" onchange="suggestAlias()"></select>
+          <select id="chosenModel" class="mono" onchange="onModelSelectionChange()"></select>
           <button class="subtle" onclick="loadModels()">Scan</button>
         </div>
       </div>
@@ -474,7 +482,7 @@
           </div>
           <div class="field">
             <label>KV Cache Precision (-ctk/-ctv)</label>
-            <select id="kvCache">
+            <select id="kvCache" onchange="updateVramAndMtpAdvisory()">
               <option value="q8_0" selected>q8_0 (Save 50% VRAM, no loss)</option>
               <option value="q4_0">q4_0 (Save 75% VRAM)</option>
               <option value="f16">f16 (Uncompressed 16-bit)</option>
@@ -512,6 +520,28 @@
             <select id="lanAccess" onchange="onLanAccessChange()">
               <option value="false" selected>OFF (127.0.0.1 - Loopback only)</option>
               <option value="true">ON (0.0.0.0 - Expose on local network)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>MTP Speculative Decoding <span id="mtpHeadBadge" class="badge">Auto</span></label>
+            <select id="mtpMode" onchange="updateVramAndMtpAdvisory()">
+              <option value="auto" selected>Auto (Enable if GGUF has MTP &amp; 1 Slot)</option>
+              <option value="on">Force ON (--spec-type draft-mtp)</option>
+              <option value="off">OFF (Standard Single-Token)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>MTP Draft Max / Confidence</label>
+            <div style="display:flex; gap:6px;">
+              <input id="specDraftNMax" type="number" min="1" max="64" step="1" value="16" title="--spec-draft-n-max (Default: 16)" style="flex:1;" oninput="updateVramAndMtpAdvisory()">
+              <input id="specDraftPMin" type="number" min="0.0" max="1.0" step="0.05" value="0.75" title="--spec-draft-p-min (Default: 0.75)" style="flex:1;" oninput="updateVramAndMtpAdvisory()">
+            </div>
+          </div>
+          <div class="field">
+            <label>Vision Projector (--mmproj) <span id="mmprojBadge" class="badge">Auto</span></label>
+            <select id="mmprojMode" onchange="updateVramAndMtpAdvisory()">
+              <option value="auto" selected>Auto (Pair sibling mmproj in folder)</option>
+              <option value="off">OFF (Text-only saves ~1-2 GB VRAM)</option>
             </select>
           </div>
         </div>
@@ -792,6 +822,8 @@ async function refreshStatus() {
     let s = await api('/status');
     let g = s.gpu;
     if (g.available) {
+      window.detectedGpuVramMb = g.total_mb || 0;
+      window.detectedGpuName = g.name || 'GPU';
       $('gpuDot').className = 'status-dot online';
       $('gpuText').textContent = `${g.name} · ${g.used_mb}/${g.total_mb} MB (${g.temperature_c}°C)`;
     } else {
@@ -861,10 +893,16 @@ async function loadModels() {
     }
 
     for (const m of localModels) {
-      let o = document.createElement('option');
-      o.value = m.path;
-      o.textContent = m.relative;
-      sel.append(o);
+      if (!m.mmproj) {
+        let o = document.createElement('option');
+        o.value = m.path;
+        let tags = [];
+        if (m.nextn_predict_layers > 0) tags.push('MTP');
+        if (m.sibling_mmproj) tags.push('Vision');
+        if (m.context_length > 0) tags.push(Math.round(m.context_length / 1024) + 'K');
+        o.textContent = tags.length ? `${m.relative} [${tags.join(' · ')}]` : m.relative;
+        sel.append(o);
+      }
 
       let div = document.createElement('div');
       div.className = 'model-item';
@@ -873,20 +911,23 @@ async function loadModels() {
       name.textContent = m.relative;
       let size = document.createElement('span');
       size.className = 'model-size';
-      size.textContent = m.size_gb + ' GB';
+      let metaLabel = m.size_gb + ' GB';
+      if (m.nextn_predict_layers > 0) metaLabel += ' · MTP';
+      if (m.sibling_mmproj) metaLabel += ' · Vision';
+      size.textContent = metaLabel;
       let btn = document.createElement('button');
       btn.className = 'subtle';
-      btn.textContent = 'Select';
+      btn.textContent = m.mmproj ? 'Projector' : 'Select';
       btn.disabled = m.mmproj;
       btn.onclick = () => {
         sel.value = m.path;
-        suggestAlias();
+        onModelSelectionChange();
         toast('Selected: ' + m.relative);
       };
       div.append(name, size, btn);
       list.append(div);
     }
-    suggestAlias();
+    onModelSelectionChange();
   } catch(e) {
     toast('Models: ' + e.message);
   }
@@ -895,6 +936,163 @@ async function loadModels() {
 function suggestAlias() {
   const be = $('backendEngine').value;
   $('alias').value = standardAliasFor(be);
+}
+
+function getSelectedModelObj() {
+  const path = $('chosenModel') ? $('chosenModel').value : '';
+  return (localModels || []).find(m => m.path === path) || null;
+}
+
+function sanitizeCustomFlagsInput() {
+  const el = $('custom_flags');
+  if (!el || !el.value) return;
+  const tokens = el.value.trim().split(/\s+/).filter(Boolean);
+  const specOpts = new Set(['--spec-type', '--spec-draft-n-max', '--spec-draft-n-min', '--spec-draft-p-min', '--draft-p-min', '--draft-max', '--draft', '--mmproj']);
+  const out = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    const isOpt = specOpts.has(t) || Array.from(specOpts).some(o => t.startsWith(o + '='));
+    if (isOpt) {
+      if (!t.includes('=') && i + 1 < tokens.length && !tokens[i + 1].startsWith('-')) {
+        i++;
+      }
+      continue;
+    }
+    out.push(t);
+  }
+  el.value = out.join(' ');
+}
+
+function onModelSelectionChange() {
+  suggestAlias();
+  const m = getSelectedModelObj();
+  const badgesEl = $('modelMetaBadges');
+  const mtpBadge = $('mtpHeadBadge');
+  const mmprojBadge = $('mmprojBadge');
+  if (m) {
+    if (m.context_length > 0) {
+      baseContextSize = m.context_length;
+    }
+    if (badgesEl) {
+      const items = [];
+      if (m.architecture) items.push(`<span class="badge">${m.architecture}</span>`);
+      if (m.context_length > 0) items.push(`<span class="badge">Native ${Math.round(m.context_length / 1024)}K</span>`);
+      if (m.nextn_predict_layers > 0) items.push(`<span class="badge" style="color:var(--emerald);">MTP (${m.nextn_predict_layers} head)</span>`);
+      if (m.sibling_mmproj) items.push(`<span class="badge">mmproj (${m.sibling_mmproj.size_gb} GB)</span>`);
+      badgesEl.innerHTML = items.join('');
+    }
+    if (mtpBadge) {
+      mtpBadge.textContent = m.nextn_predict_layers > 0 ? `MTP Ready (${m.nextn_predict_layers})` : 'No MTP Head';
+    }
+    if (mmprojBadge) {
+      mmprojBadge.textContent = m.sibling_mmproj ? `${m.sibling_mmproj.name} (${m.sibling_mmproj.size_gb}G)` : 'None';
+    }
+  }
+  updateVramAndMtpAdvisory();
+}
+
+function estimateSetupVramGb(m, totalCtx, kvPrecision, mtpActive, mmprojActive) {
+  if (!m) return { totalGb: 0, kvGb: 0, modelGb: 0, mmprojGb: 0 };
+  const modelGb = m.size_gb || 0;
+  const mmprojGb = (mmprojActive && m.sibling_mmproj) ? (m.sibling_mmproj.size_gb || 0) : 0;
+  const blocks = m.block_count || 48;
+  const interval = m.full_attention_interval || 0;
+  const attnLayers = interval > 0 ? Math.max(4, Math.ceil(blocks / interval)) : blocks;
+  const headKv = m.head_count_kv || 4;
+  const kLen = m.key_length || 128;
+  const vLen = m.value_length || 128;
+  const bytesPerElem = kvPrecision === 'f16' ? 2.0 : (kvPrecision === 'q8_0' ? 1.05 : 0.5625);
+  const singleKvBytes = totalCtx * attnLayers * headKv * (kLen + vLen) * bytesPerElem;
+  const kvMultiplier = mtpActive ? 2.0 : 1.0;
+  const kvGb = (singleKvBytes * kvMultiplier) / 1e9;
+  const computeOverheadGb = mtpActive ? 2.2 : 1.4;
+  const totalGb = Math.round((modelGb + mmprojGb + kvGb + computeOverheadGb) * 10) / 10;
+  return { totalGb, kvGb: Math.round(kvGb * 10) / 10, modelGb, mmprojGb };
+}
+
+function updateVramAndMtpAdvisory() {
+  const banner = $('mtpAdvisoryBanner');
+  const textEl = $('mtpAdvisoryText');
+  if (!banner || !textEl) return;
+
+  const m = getSelectedModelObj();
+  if (!m || $('backendEngine').value !== 'llama.cpp') {
+    banner.style.display = 'none';
+    return;
+  }
+
+  const slots = parseInt($('parallel') ? $('parallel').value : '1', 10) || 1;
+  const perSlot = getContextValue();
+  const totalCtx = perSlot * slots;
+  const ctxExtend = $('contextExtend') ? $('contextExtend').value : 'none';
+  const kvCache = $('kvCache') ? $('kvCache').value : 'q8_0';
+  const mtpMode = $('mtpMode') ? $('mtpMode').value : 'auto';
+  const mmprojMode = $('mmprojMode') ? $('mmprojMode').value : 'auto';
+
+  const hasMtp = (m.nextn_predict_layers || 0) > 0;
+  const mtpActive = slots === 1 && (mtpMode === 'on' || (mtpMode === 'auto' && hasMtp));
+  const mmprojActive = mmprojMode === 'auto' && Boolean(m.sibling_mmproj);
+
+  const est = estimateSetupVramGb(m, totalCtx, kvCache, mtpActive, mmprojActive);
+  const vramMb = window.detectedGpuVramMb || 0;
+  const vramGb = vramMb > 0 ? Math.round((vramMb / 1024) * 10) / 10 : 0;
+  const gpuName = window.detectedGpuName || 'Detected GPU';
+
+  const badge = $('totalKvBadge');
+  if (badge) {
+    const ctxStr = totalCtx >= 1024 ? `${Math.round(totalCtx / 1024)}K` : `${totalCtx}`;
+    badge.textContent = `KV: ${ctxStr} (~${est.totalGb} GB VRAM)`;
+  }
+
+  const warnings = [];
+  const nativeCtx = m.context_length || 262144;
+  if (mtpActive && (ctxExtend !== 'none' || totalCtx > nativeCtx)) {
+    warnings.push(
+      `<strong>Long-Context MTP Overhead Trap:</strong> <code>draft-mtp</code> is active with extended context (${totalCtx.toLocaleString()} &gt; native ${nativeCtx.toLocaleString()}, mode: <code>${ctxExtend}</code>). MTP draft heads run dense full-attention across the active KV cache and allocate a 2nd <code>ctx_dft</code> context, which can cause net-negative throughput or VRAM thrashing.`
+    );
+  }
+  if (vramGb > 0 && est.totalGb > vramGb * 0.95) {
+    warnings.push(
+      `<strong>VRAM Spillover Risk (${gpuName} ${vramGb} GB):</strong> Estimated footprint is <strong>~${est.totalGb} GB</strong> (Model: ${est.modelGb}G${est.mmprojGb ? ` + mmproj: ${est.mmprojGb}G` : ''} + ${mtpActive ? '2x MTP ' : ''}KV/Compute: ${(est.totalGb - est.modelGb - est.mmprojGb).toFixed(1)}G). Exceeding dedicated VRAM spills into shared PCIe RAM and severely throttles generation.`
+    );
+  }
+
+  if (warnings.length > 0) {
+    textEl.innerHTML = warnings.join('<br>');
+    banner.style.display = 'flex';
+  } else {
+    banner.style.display = 'none';
+  }
+}
+
+function optimizeForVramAndMtp() {
+  const m = getSelectedModelObj();
+  const nativeCtx = (m && m.context_length > 0) ? m.context_length : 262144;
+  if ($('contextExtend')) $('contextExtend').value = 'none';
+  if ($('parallel')) $('parallel').value = '1';
+  if ($('kvCache')) $('kvCache').value = 'q4_0';
+  if ($('mtpMode')) $('mtpMode').value = (m && m.nextn_predict_layers > 0) ? 'auto' : 'off';
+
+  let targetCtx = nativeCtx;
+  const vramMb = window.detectedGpuVramMb || 0;
+  const vramGb = vramMb > 0 ? (vramMb / 1024) : 0;
+  if (m && vramGb > 0) {
+    const hasMtp = (m.nextn_predict_layers || 0) > 0;
+    const mmprojActive = ($('mmprojMode') ? $('mmprojMode').value : 'auto') === 'auto' && Boolean(m.sibling_mmproj);
+    const candidates = [nativeCtx, 262144, 131072, 65536, 32768, 16384, 8192].filter(c => c <= nativeCtx);
+    for (const c of candidates) {
+      const est = estimateSetupVramGb(m, c, 'q4_0', hasMtp, mmprojActive);
+      if (est.totalGb <= vramGb * 0.94) {
+        targetCtx = c;
+        break;
+      }
+    }
+  }
+  setContextValue(targetCtx);
+  sanitizeCustomFlagsInput();
+  updateTotalKvBadge();
+  updateVramAndMtpAdvisory();
+  toast(`Optimized for GPU & MTP: -c ${targetCtx.toLocaleString()}, KV q4_0, 1x Native RoPE`);
 }
 
 let baseContextSize = 8192;
@@ -957,6 +1155,9 @@ function updateTotalKvBadge() {
   const badge = $('totalKvBadge');
   if (badge) {
     badge.textContent = total >= 1024 ? `KV: ${Math.round(total / 1024)}K` : `KV: ${total}`;
+  }
+  if (typeof updateVramAndMtpAdvisory === 'function') {
+    updateVramAndMtpAdvisory();
   }
 }
 
@@ -1051,6 +1252,10 @@ function getDeployPayload() {
     repeat_penalty: +$('repeat_penalty').value,
     main_gpu: +$('main_gpu').value,
     split_mode: $('split_mode').value,
+    mtp_mode: $('mtpMode') ? $('mtpMode').value : 'auto',
+    spec_draft_n_max: +($('specDraftNMax') ? $('specDraftNMax').value : 16) || 16,
+    spec_draft_p_min: parseFloat($('specDraftPMin') ? $('specDraftPMin').value : '0.75') || 0.75,
+    mmproj_mode: $('mmprojMode') ? $('mmprojMode').value : 'auto',
     custom_flags: $('custom_flags').value,
   };
 }
@@ -1323,9 +1528,21 @@ async function init() {
     if (s.last_split_mode) $('split_mode').value = s.last_split_mode;
     if (s.last_reasoning !== undefined) $('reasoning').value = s.last_reasoning ? 'true' : 'false';
     if (s.last_lan_access !== undefined) $('lanAccess').value = s.last_lan_access ? 'true' : 'false';
+    if (s.last_model_path && $('chosenModel')) {
+      const hasOpt = Array.from($('chosenModel').options).some(o => o.value === s.last_model_path);
+      if (hasOpt) $('chosenModel').value = s.last_model_path;
+    }
+    if (s.last_mtp_mode && $('mtpMode')) $('mtpMode').value = s.last_mtp_mode;
+    if (s.last_spec_draft_n_max !== undefined && $('specDraftNMax')) $('specDraftNMax').value = s.last_spec_draft_n_max;
+    if (s.last_spec_draft_p_min !== undefined && $('specDraftPMin')) $('specDraftPMin').value = s.last_spec_draft_p_min;
+    if (s.last_mmproj_mode && $('mmprojMode')) $('mmprojMode').value = s.last_mmproj_mode;
     onBackendChange();
-    if (s.last_custom_flags) $('custom_flags').value = s.last_custom_flags;
+    if (s.last_custom_flags !== undefined) {
+      $('custom_flags').value = s.last_custom_flags;
+      sanitizeCustomFlagsInput();
+    }
     if (s.last_edit_format) $('editFormat').value = s.last_edit_format;
+    onModelSelectionChange();
   } catch(e) {}
 }
 

@@ -131,6 +131,48 @@ def strip_incompatible_parallel_flags(custom_args: List[str], parallel_slots: in
     return cleaned, stripped
 
 
+def sanitize_managed_custom_flags(
+    custom_args: List[str],
+    strip_spec: bool = True,
+    strip_mmproj: bool = True,
+) -> List[str]:
+    """
+    Removes CLI flags managed by structured MTP and mmproj controls so legacy `custom_flags`
+    do not pass duplicate `--spec-type` or stale `--mmproj` paths from a previously selected model.
+    """
+    if not custom_args:
+        return []
+    spec_opts = {
+        '--spec-type',
+        '--spec-draft-n-max',
+        '--spec-draft-n-min',
+        '--spec-draft-p-min',
+        '--draft-p-min',
+        '--draft-max',
+        '--draft',
+    }
+    mmproj_opts = {'--mmproj'}
+    cleaned: List[str] = []
+    i = 0
+    while i < len(custom_args):
+        arg = custom_args[i]
+        if strip_spec and (arg in spec_opts or any(arg.startswith(f'{o}=') for o in spec_opts)):
+            if '=' not in arg and i + 1 < len(custom_args) and not custom_args[i + 1].startswith('-'):
+                i += 2
+            else:
+                i += 1
+            continue
+        if strip_mmproj and (arg in mmproj_opts or any(arg.startswith(f'{o}=') for o in mmproj_opts)):
+            if '=' not in arg and i + 1 < len(custom_args) and not custom_args[i + 1].startswith('-'):
+                i += 2
+            else:
+                i += 1
+            continue
+        cleaned.append(arg)
+        i += 1
+    return cleaned
+
+
 def load_downloads():
     """Load persisted downloads state from config/config.json."""
     cfg = load_config()
@@ -303,6 +345,10 @@ class Deploy(BaseModel):
     main_gpu: int = Field(default=0, ge=0, le=16)
     split_mode: str = Field(default='layer', pattern='^(none|layer|row)$')
     lan_access: bool = False
+    mtp_mode: str = Field(default='auto', pattern=r'^(auto|on|off)$')
+    spec_draft_n_max: int = Field(default=16, ge=1, le=64)
+    spec_draft_p_min: float = Field(default=0.75, ge=0.0, le=1.0)
+    mmproj_mode: str = Field(default='auto', pattern=r'^(auto|off)$')
     custom_flags: str = ''
 
 
@@ -346,6 +392,10 @@ class OpenCodeLaunch(BaseModel):
     main_gpu: int = Field(default=0, ge=0, le=16)
     split_mode: str = Field(default='layer', pattern='^(none|layer|row)$')
     lan_access: bool = False
+    mtp_mode: str = Field(default='auto', pattern=r'^(auto|on|off)$')
+    spec_draft_n_max: int = Field(default=16, ge=1, le=64)
+    spec_draft_p_min: float = Field(default=0.75, ge=0.0, le=1.0)
+    mmproj_mode: str = Field(default='auto', pattern=r'^(auto|off)$')
     custom_flags: str = ''
     restore_history: bool = False
     session_id: str = ''
@@ -376,6 +426,10 @@ class AiderLaunch(BaseModel):
     main_gpu: int = Field(default=0, ge=0, le=16)
     split_mode: str = Field(default='layer', pattern='^(none|layer|row)$')
     lan_access: bool = False
+    mtp_mode: str = Field(default='auto', pattern=r'^(auto|on|off)$')
+    spec_draft_n_max: int = Field(default=16, ge=1, le=64)
+    spec_draft_p_min: float = Field(default=0.75, ge=0.0, le=1.0)
+    mmproj_mode: str = Field(default='auto', pattern=r'^(auto|off)$')
     custom_flags: str = ''
     edit_format: str = Field(default='diff', pattern=r'^(diff|whole|udiff|architect)$')
     restore_history: bool = False
@@ -597,45 +651,68 @@ def hardware():
     return load_hardware()
 
 
-@app.get('/api/models')
-def models():
-    found = []
-    if MODEL_DIR.exists():
-        for p in sorted(MODEL_DIR.rglob('*.gguf')):
-            if p.is_file():
-                st = p.stat()
-                found.append({
-                    'path': str(p),
-                    'name': p.name,
-                    'relative': p.relative_to(MODEL_DIR).as_posix(),
+_gguf_meta_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+
+def find_sibling_mmproj(model_path: Path) -> Optional[Dict[str, Any]]:
+    """Locates a sibling mmproj*.gguf file in the same directory as `model_path`."""
+    try:
+        parent = Path(model_path).resolve().parent
+        if not parent.is_dir():
+            return None
+        for cand in sorted(parent.glob('*.gguf')):
+            if cand.is_file() and 'mmproj' in cand.name.lower() and cand.resolve() != Path(model_path).resolve():
+                st = cand.stat()
+                return {
+                    'path': str(cand),
+                    'name': cand.name,
                     'size_gb': round(st.st_size / 1e9, 2),
                     'size_bytes': st.st_size,
-                    'modified': datetime.fromtimestamp(st.st_mtime).isoformat(timespec='minutes'),
-                    'mmproj': 'mmproj' in p.name.lower(),
-                })
-            if len(found) >= 500:
-                break
-    return {'models': found, 'directory': str(MODEL_DIR)}
+                }
+    except Exception:
+        pass
+    return None
 
 
-def get_gguf_architecture(model_path: Path) -> str:
+def get_gguf_metadata(model_path: Path) -> Dict[str, Any]:
     """
-    Extracts general.architecture string from GGUF binary header without external deps.
-    Fast, stream-based seek avoids loading model weights into memory.
+    Extracts architecture, native context_length, nextn_predict_layers (MTP), block_count,
+    and attention dimensions from GGUF binary header without loading weights into RAM.
     """
+    default_meta: Dict[str, Any] = {
+        'architecture': '',
+        'context_length': 0,
+        'nextn_predict_layers': 0,
+        'block_count': 0,
+        'head_count_kv': 0,
+        'key_length': 128,
+        'value_length': 128,
+        'full_attention_interval': 0,
+        'sibling_mmproj': None,
+    }
     try:
-        p = Path(model_path)
+        p = Path(model_path).resolve()
         if not p.is_file() or p.stat().st_size < 32:
-            return ''
+            return default_meta
+        mtime = p.stat().st_mtime
+        cache_key = str(p)
+        cached = _gguf_meta_cache.get(cache_key)
+        if cached and cached[0] == mtime:
+            res = dict(cached[1])
+            res['sibling_mmproj'] = find_sibling_mmproj(p)
+            return res
+
+        raw_kv: Dict[str, Any] = {}
         with open(p, 'rb') as f:
             if f.read(4) != b'GGUF':
-                return ''
+                return default_meta
             version = struct.unpack('<I', f.read(4))[0]
             if version not in (2, 3):
-                return ''
+                return default_meta
             _tensor_count = struct.unpack('<Q', f.read(8))[0]
             kv_count = struct.unpack('<Q', f.read(8))[0]
-            for _ in range(min(kv_count, 128)):
+            scalar_sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+            for _ in range(min(kv_count, 1024)):
                 klen_bytes = f.read(8)
                 if len(klen_bytes) < 8:
                     break
@@ -647,27 +724,27 @@ def get_gguf_architecture(model_path: Path) -> str:
                 if len(vtype_bytes) < 4:
                     break
                 vtype = struct.unpack('<I', vtype_bytes)[0]
-                if key == 'general.architecture':
-                    if vtype == 8:
-                        slen_bytes = f.read(8)
-                        if len(slen_bytes) == 8:
-                            slen = struct.unpack('<Q', slen_bytes)[0]
-                            return f.read(slen).decode('utf-8', errors='ignore')
-                    break
-                if vtype in (0, 1):
-                    f.seek(1, os.SEEK_CUR)
-                elif vtype in (2, 3):
-                    f.seek(2, os.SEEK_CUR)
-                elif vtype in (4, 5, 10):
-                    f.seek(4, os.SEEK_CUR)
-                elif vtype in (6, 7, 11):
-                    f.seek(8, os.SEEK_CUR)
+                if vtype in (4, 5):
+                    val_b = f.read(4)
+                    if len(val_b) < 4:
+                        break
+                    raw_kv[key] = struct.unpack('<I' if vtype == 4 else '<i', val_b)[0]
+                elif vtype in (10, 11):
+                    val_b = f.read(8)
+                    if len(val_b) < 8:
+                        break
+                    raw_kv[key] = struct.unpack('<Q' if vtype == 10 else '<q', val_b)[0]
                 elif vtype == 8:
                     slen_b = f.read(8)
                     if len(slen_b) < 8:
                         break
                     slen = struct.unpack('<Q', slen_b)[0]
-                    f.seek(slen, os.SEEK_CUR)
+                    if key == 'general.architecture' and slen <= 256:
+                        raw_kv[key] = f.read(slen).decode('utf-8', errors='ignore')
+                    else:
+                        f.seek(slen, os.SEEK_CUR)
+                elif vtype in scalar_sizes:
+                    f.seek(scalar_sizes[vtype], os.SEEK_CUR)
                 elif vtype == 9:
                     atype_b = f.read(4)
                     alen_b = f.read(8)
@@ -675,7 +752,7 @@ def get_gguf_architecture(model_path: Path) -> str:
                         break
                     atype = struct.unpack('<I', atype_b)[0]
                     alen = struct.unpack('<Q', alen_b)[0]
-                    sz = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 8, 7: 8, 10: 4, 11: 8}.get(atype)
+                    sz = scalar_sizes.get(atype)
                     if sz:
                         f.seek(sz * alen, os.SEEK_CUR)
                     elif atype == 8:
@@ -689,15 +766,66 @@ def get_gguf_architecture(model_path: Path) -> str:
                         break
                 else:
                     break
+
+        arch = str(raw_kv.get('general.architecture', '') or '')
+        meta = dict(default_meta)
+        meta['architecture'] = arch
+        if arch:
+            meta['context_length'] = int(raw_kv.get(f'{arch}.context_length', 0) or 0)
+            meta['nextn_predict_layers'] = int(raw_kv.get(f'{arch}.nextn_predict_layers', 0) or 0)
+            meta['block_count'] = int(raw_kv.get(f'{arch}.block_count', 0) or 0)
+            meta['head_count_kv'] = int(raw_kv.get(f'{arch}.attention.head_count_kv', 0) or 0)
+            meta['key_length'] = int(raw_kv.get(f'{arch}.attention.key_length', 128) or 128)
+            meta['value_length'] = int(raw_kv.get(f'{arch}.attention.value_length', 128) or 128)
+            meta['full_attention_interval'] = int(raw_kv.get(f'{arch}.full_attention_interval', 0) or 0)
+        _gguf_meta_cache[cache_key] = (mtime, dict(meta))
+        meta['sibling_mmproj'] = find_sibling_mmproj(p)
+        return meta
     except Exception:
-        pass
-    return ''
+        return default_meta
 
 
-def build_context_extension_flags(backend: str, preset: str) -> list:
+def get_gguf_architecture(model_path: Path) -> str:
+    """Extracts general.architecture string from GGUF binary header."""
+    return get_gguf_metadata(model_path).get('architecture', '')
+
+
+@app.get('/api/models')
+def models():
+    found = []
+    if MODEL_DIR.exists():
+        for p in sorted(MODEL_DIR.rglob('*.gguf')):
+            if p.is_file():
+                st = p.stat()
+                is_mmproj = 'mmproj' in p.name.lower()
+                meta = get_gguf_metadata(p) if not is_mmproj else {}
+                found.append({
+                    'path': str(p),
+                    'name': p.name,
+                    'relative': p.relative_to(MODEL_DIR).as_posix(),
+                    'size_gb': round(st.st_size / 1e9, 2),
+                    'size_bytes': st.st_size,
+                    'modified': datetime.fromtimestamp(st.st_mtime).isoformat(timespec='minutes'),
+                    'mmproj': is_mmproj,
+                    'architecture': meta.get('architecture', ''),
+                    'context_length': meta.get('context_length', 0),
+                    'nextn_predict_layers': meta.get('nextn_predict_layers', 0),
+                    'block_count': meta.get('block_count', 0),
+                    'head_count_kv': meta.get('head_count_kv', 0),
+                    'key_length': meta.get('key_length', 128),
+                    'value_length': meta.get('value_length', 128),
+                    'full_attention_interval': meta.get('full_attention_interval', 0),
+                    'sibling_mmproj': meta.get('sibling_mmproj'),
+                })
+            if len(found) >= 500:
+                break
+    return {'models': found, 'directory': str(MODEL_DIR)}
+
+
+def build_context_extension_flags(backend: str, preset: str, orig_ctx: int = 0) -> list:
     """
     Translates Context Extension preset ('none', 'linear_2x', 'yarn_2x', 'yarn_4x', 'yarn_8x')
-    into backend-specific RoPE / YaRN CLI flags.
+    into backend-specific RoPE / YaRN CLI flags, including `--yarn-orig-ctx` when native context is known.
     """
     if not preset or preset == 'none':
         return []
@@ -717,6 +845,8 @@ def build_context_extension_flags(backend: str, preset: str) -> list:
         flags = ['--rope-scaling', stype, '--rope-scale', str(factor)]
         if stype == 'yarn':
             flags.extend(['--yarn-ext-factor', '-1.0'])
+            if orig_ctx > 0:
+                flags.extend(['--yarn-orig-ctx', str(orig_ctx)])
         return flags
     return []
 
@@ -738,13 +868,40 @@ def launch_backend_process(backend, path, params):
     per_slot_ctx = int(getattr(params, 'context', 8192) or 8192)
     effective_ctx = per_slot_ctx * parallel_slots
 
+    meta = get_gguf_metadata(path)
+    arch = meta.get('architecture', '')
+    orig_ctx = int(meta.get('context_length', 0) or 0)
+    nextn_layers = int(meta.get('nextn_predict_layers', 0) or 0)
+    sibling_mmproj = meta.get('sibling_mmproj')
+
     ctx_ext = getattr(params, 'context_extend', 'none') or 'none'
     rag_on = bool(getattr(params, 'rag_enabled', False))
-    ext_flags = build_context_extension_flags(backend, ctx_ext)
+    mtp_mode = getattr(params, 'mtp_mode', 'auto') or 'auto'
+    spec_draft_n_max = int(getattr(params, 'spec_draft_n_max', 16) or 16)
+    spec_draft_p_min = float(getattr(params, 'spec_draft_p_min', 0.75) if getattr(params, 'spec_draft_p_min', None) is not None else 0.75)
+    mmproj_mode = getattr(params, 'mmproj_mode', 'auto') or 'auto'
+
+    ext_flags = build_context_extension_flags(backend, ctx_ext, orig_ctx=orig_ctx)
     raw_custom_args = [arg for arg in params.custom_flags.split() if arg.strip()] if getattr(params, 'custom_flags', None) else []
-    custom_args, stripped_spec = strip_incompatible_parallel_flags(raw_custom_args, parallel_slots)
-    if stripped_spec:
-        append_log(f"[INFO] Auto-disabled --spec-type draft-mtp because parallel={parallel_slots} > 1 (incompatible with multi-slot continuous batching)")
+
+    want_mtp = (mtp_mode == 'on') or (mtp_mode == 'auto' and nextn_layers > 0)
+    mtp_active = False
+    stripped_spec = False
+    if backend == 'llama.cpp' and want_mtp:
+        if parallel_slots > 1:
+            stripped_spec = True
+            append_log(f"[INFO] Auto-disabled draft-mtp because parallel={parallel_slots} > 1 (incompatible with multi-slot continuous batching)")
+        else:
+            mtp_active = True
+
+    # Strip managed --spec-type / --mmproj from custom_flags so structured controls and current model sibling mmproj win cleanly
+    sanitized_custom = sanitize_managed_custom_flags(
+        raw_custom_args,
+        strip_spec=(backend == 'llama.cpp'),
+        strip_mmproj=(backend == 'llama.cpp'),
+    )
+    custom_args, legacy_stripped = strip_incompatible_parallel_flags(sanitized_custom, parallel_slots)
+    stripped_spec = stripped_spec or legacy_stripped
 
     key = rotate_api_key()
     lan = bool(getattr(params, 'lan_access', False))
@@ -862,9 +1019,21 @@ def launch_backend_process(backend, path, params):
             args += ['--embeddings', '--pooling', 'mean']
         args.extend(ext_flags)
         if effective_ctx > 0 and not any('--override-kv' in a for a in custom_args):
-            arch = get_gguf_architecture(path)
             if arch:
                 args.extend(['--override-kv', f'{arch}.context_length=int:{effective_ctx}'])
+        if mtp_active:
+            args.extend([
+                '--spec-type', 'draft-mtp',
+                '--spec-draft-n-max', str(spec_draft_n_max),
+                '--spec-draft-p-min', str(spec_draft_p_min),
+            ])
+            if ctx_ext != 'none' or (orig_ctx > 0 and effective_ctx > orig_ctx):
+                append_log(
+                    f"[WARN] Long-Context MTP Trap: draft-mtp active with extended context ({effective_ctx} > native {orig_ctx}, extend={ctx_ext}). "
+                    f"Dense MTP attention scales quadratically and allocates 2x KV contexts."
+                )
+        if mmproj_mode == 'auto' and sibling_mmproj and sibling_mmproj.get('path'):
+            args.extend(['--mmproj', str(sibling_mmproj['path'])])
         args.extend(custom_args)
 
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -929,6 +1098,12 @@ def launch_backend_process(backend, path, params):
         'repeat_penalty': params.repeat_penalty,
         'main_gpu': params.main_gpu,
         'split_mode': params.split_mode,
+        'mtp_mode': mtp_mode,
+        'mtp_active': mtp_active,
+        'spec_draft_n_max': spec_draft_n_max,
+        'spec_draft_p_min': spec_draft_p_min,
+        'mmproj_mode': mmproj_mode,
+        'mmproj_path': sibling_mmproj.get('path') if (mmproj_mode == 'auto' and sibling_mmproj) else None,
         'custom_flags': ' '.join(custom_args),
         'spec_auto_disabled': stripped_spec,
     }
@@ -967,7 +1142,11 @@ def start(params: Deploy):
             'last_split_mode': params.split_mode,
             'last_lan_access': params.lan_access,
             'last_reasoning': params.reasoning,
-            'last_custom_flags': params.custom_flags,
+            'last_mtp_mode': params.mtp_mode,
+            'last_spec_draft_n_max': params.spec_draft_n_max,
+            'last_spec_draft_p_min': params.spec_draft_p_min,
+            'last_mmproj_mode': params.mmproj_mode,
+            'last_custom_flags': ' '.join(sanitize_managed_custom_flags(params.custom_flags.split())),
         })
         write_opencode_config(None, params.alias, PORT, context_limit=params.context)
         return {'ok': True, 'pid': proc.pid, 'command': args, 'message': f'[{params.backend}] launching; health may take time to become ready.'}
@@ -1383,7 +1562,11 @@ def launch_opencode(params: OpenCodeLaunch):
         'last_split_mode': params.split_mode,
         'last_lan_access': params.lan_access,
         'last_reasoning': params.reasoning,
-        'last_custom_flags': params.custom_flags,
+        'last_mtp_mode': params.mtp_mode,
+        'last_spec_draft_n_max': params.spec_draft_n_max,
+        'last_spec_draft_p_min': params.spec_draft_p_min,
+        'last_mmproj_mode': params.mmproj_mode,
+        'last_custom_flags': ' '.join(sanitize_managed_custom_flags(params.custom_flags.split())),
         'last_project_dir': str(project),
     })
 
@@ -1499,7 +1682,11 @@ def launch_aider(params: AiderLaunch):
         'last_split_mode': params.split_mode,
         'last_lan_access': params.lan_access,
         'last_reasoning': params.reasoning,
-        'last_custom_flags': params.custom_flags,
+        'last_mtp_mode': params.mtp_mode,
+        'last_spec_draft_n_max': params.spec_draft_n_max,
+        'last_spec_draft_p_min': params.spec_draft_p_min,
+        'last_mmproj_mode': params.mmproj_mode,
+        'last_custom_flags': ' '.join(sanitize_managed_custom_flags(params.custom_flags.split())),
         'last_project_dir': str(project),
         'last_edit_format': params.edit_format,
     })
