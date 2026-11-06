@@ -2,7 +2,7 @@
 """
 Interactive cross-platform installer, hardware & package scanner (`config/hardware.json`),
 prerequisite verifier, source compiler for backend engines (llama.cpp, koboldcpp, ollama),
-venv-scoped CLI coding agent installer (aider, opencode), VS Code Continue configurator,
+venv-scoped CLI coding agent installer (opencode, claude, codex), VS Code Continue configurator,
 and full uninstaller (`--uninstall`) across Windows, Linux, and macOS.
 """
 import json
@@ -1163,7 +1163,7 @@ def download_prebuilt_ollama() -> bool:
 
 
 # ==============================================================================
-# CLI Agents: Aider & OpenCode (Installed directly inside llm-dash .venv)
+# CLI Agents: OpenCode, Claude Code & Codex (Installed directly inside llm-dash .venv)
 # ==============================================================================
 def is_binary_runnable(bin_path: Path, min_version: Tuple[int, int, int] = (0, 0, 0)) -> bool:
     """Verifies that an executable binary can run and optionally meets min_version."""
@@ -1374,30 +1374,94 @@ def _install_opencode_into_venv(venv_dir: Path) -> bool:
     return False
 
 
+# npm package per npm-scoped harness; floors live in src.common.paths.HARNESS_MIN_VERSIONS.
+NPM_HARNESS_PACKAGES = {
+    'claude': '@anthropic-ai/claude-code',
+    'codex': '@openai/codex',
+}
+
+
+def _install_npm_harness(venv_dir: Path, name: str) -> bool:
+    """
+    Installs an npm harness CLI (`claude`, `codex`) scoped to the llm-dash .venv (`npm install --prefix <venv>`)
+    and exposes it as `.venv/bin/<name>` (symlink) or `.venv/Scripts/<name>.cmd` (wrapper) so discovery and
+    PATH-free launches work identically to OpenCode.
+    """
+    from src.common.paths import HARNESS_MIN_VERSIONS
+    pkg = NPM_HARNESS_PACKAGES[name]
+    floor = HARNESS_MIN_VERSIONS.get(name, (0, 0, 0))
+    is_win = os.name == 'nt'
+    venv_bin_dir = venv_dir / ('Scripts' if is_win else 'bin')
+    venv_bin_dir.mkdir(parents=True, exist_ok=True)
+    target = venv_bin_dir / (f'{name}.cmd' if is_win else name)
+    if (target.is_file() or target.is_symlink()) and is_binary_runnable(target, min_version=floor):
+        print(f"{name} CLI already present and runnable in venv at {target}")
+        return True
+    npm_exe = shutil.which('npm')
+    if not npm_exe:
+        print(f"npm not found; install Node.js >= 18 (https://nodejs.org) then rerun setup to get {pkg}.")
+        return False
+    print(f"Installing {pkg}@latest into {venv_dir} via npm...")
+    try:
+        subprocess.run([npm_exe, 'install', '--prefix', str(venv_dir), f'{pkg}@latest'], check=True)
+    except Exception as e:
+        print(f"Warning: npm install of {pkg} failed: {e}")
+        return False
+    npm_bin = venv_dir / 'node_modules' / '.bin' / (f'{name}.cmd' if is_win else name)
+    if not (npm_bin.is_file() or npm_bin.is_symlink()):
+        print(f"Warning: {npm_bin} missing after npm install.")
+        return False
+    target.unlink(missing_ok=True)
+    if is_win:
+        target.write_text(f'@echo off\r\n"{npm_bin.resolve()}" %*\r\n', encoding='utf-8')
+    else:
+        target.symlink_to(npm_bin.resolve())
+        _strip_macos_quarantine(venv_dir / 'node_modules' / pkg.split('/')[0])
+    ok = is_binary_runnable(target, min_version=floor)
+    print(f"{name} CLI {'installed and verified' if ok else 'installed but failed version check'} at {target}")
+    return ok
+
+
+def _purge_aider(venv_python: str, venv_dir: Path) -> None:
+    """Removes the retired Aider harness (aider-chat) from existing .venv installs; litellm is kept for the proxy fallback."""
+    aider_bin = venv_dir / ('Scripts' if os.name == 'nt' else 'bin') / get_executable_name('aider')
+    if not aider_bin.exists():
+        return
+    print("Removing retired Aider harness (aider-chat) from llm-dash .venv...")
+    subprocess.run([venv_python, '-m', 'pip', 'uninstall', '-y', '-q', 'aider-chat'], check=False)
+    aider_bin.unlink(missing_ok=True)
+
+
+def _ensure_litellm_proxy(venv_python: str) -> bool:
+    """Installs `litellm[proxy]`, the Anthropic/Responses translation layer for engines lacking native endpoints."""
+    res = subprocess.run([venv_python, '-c', 'import litellm.proxy.proxy_server'], capture_output=True)
+    if res.returncode == 0:
+        return True
+    print("Installing LiteLLM proxy (litellm[proxy]) into llm-dash .venv...")
+    return subprocess.run([venv_python, '-m', 'pip', 'install', '-q', '--no-warn-script-location', 'litellm[proxy]'], check=False).returncode == 0
+
+
 def install_cli_agents(venv_python: str, non_interactive: bool = False):
-    """Prompts user to install Aider and/or OpenCode CLI coding agents inside the llm-dash .venv."""
+    """Prompts user to install OpenCode, Claude Code and/or Codex CLI coding agents inside the llm-dash .venv."""
     venv_dir = REPO_ROOT / 'src' / 'LLMServer' / '.venv'
+    _purge_aider(venv_python, venv_dir)
     print("\n=== CLI Coding Agents Setup (Installed in llm-dash .venv) ===")
-    print("  [1] Install BOTH Aider & OpenCode in .venv (Recommended)")
-    print("  [2] Install Aider only in .venv")
-    print("  [3] Install OpenCode only in .venv")
+    print("  [1] Install ALL: OpenCode, Claude Code & Codex in .venv (Recommended)")
+    print("  [2] Install OpenCode only in .venv")
+    print("  [3] Install Claude Code + Codex only in .venv")
     print("  [4] Skip CLI agent installation")
 
     choice = _prompt_choice("Select CLI agent option (1/2/3/4)", ['1', '2', '3', '4'], default='1', non_interactive=non_interactive)
 
     if choice in ('1', '2'):
-        print("\nInstalling Aider CLI (aider-chat) into llm-dash .venv...")
-        try:
-            subprocess.run([venv_python, '-m', 'pip', 'install', '-q', '--no-warn-script-location', 'setuptools', 'wheel'], check=False)
-            subprocess.run([venv_python, '-m', 'pip', 'install', '-q', '--no-warn-script-location', 'aider-chat'], check=True)
-            print("Aider installed successfully in llm-dash .venv.")
-        except Exception as e:
-            print(f"Warning: Aider pip install encountered an issue: {e}")
-
-    if choice in ('1', '3'):
         print("\nInstalling OpenCode CLI into llm-dash .venv...")
         _install_opencode_into_venv(venv_dir)
         setup_opencode_orchestrator()
+
+    if choice in ('1', '3'):
+        _ensure_litellm_proxy(venv_python)
+        for name in NPM_HARNESS_PACKAGES:
+            _install_npm_harness(venv_dir, name)
 
 
 def setup_opencode_orchestrator():
@@ -1682,7 +1746,7 @@ def main(non_interactive: bool = False, uninstall: bool = False):
     elif selections['ollama'] == '2':
         download_prebuilt_ollama()
 
-    # 5. Install CLI coding agents (Aider & OpenCode) inside llm-dash .venv
+    # 5. Install CLI coding agents (OpenCode, Claude Code & Codex) inside llm-dash .venv
     venv_py = REPO_ROOT / 'src' / 'LLMServer' / '.venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python3')
     py_exe = str(venv_py) if venv_py.is_file() else sys.executable
     install_cli_agents(py_exe, non_interactive=non_interactive)
@@ -1703,8 +1767,8 @@ def main(non_interactive: bool = False, uninstall: bool = False):
     print(f"  llama.cpp        : {cfg['binaries']['llama_cpp']} (ready={cfg['binaries']['llama_cpp_exists']})")
     print(f"  koboldcpp        : {cfg['binaries']['koboldcpp']} (ready={cfg['binaries']['koboldcpp_exists']})")
     print(f"  ollama           : {cfg['binaries']['ollama']} (ready={cfg['binaries']['ollama_exists']})")
-    print(f"  aider (.venv)    : {cfg['agents']['aider'] or 'not installed'}")
-    print(f"  opencode (.venv) : {cfg['agents']['opencode'] or 'not installed'}")
+    for name in ('opencode', 'claude', 'codex'):
+        print(f"  {name + ' (.venv)':<17}: {cfg['agents'].get(name) or 'not installed'}")
 
 
 if __name__ == '__main__':

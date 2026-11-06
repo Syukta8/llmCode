@@ -190,7 +190,7 @@ def stop_all_services() -> dict:
 
     # 2. Platform-specific sweep for orphaned dashboard or backend processes
     if os.name == 'nt':
-        for img in ('llama-server.exe', 'koboldcpp.exe'):
+        for img in ('llama-server.exe', 'koboldcpp.exe', 'litellm.exe'):
             res = subprocess.run(['taskkill', '/F', '/IM', img], capture_output=True, text=True)
             if res.returncode == 0:
                 stopped.append(img)
@@ -208,6 +208,7 @@ def stop_all_services() -> dict:
             ('llama-server', 'llama-server'),
             ('koboldcpp', 'koboldcpp'),
             ('ollama', 'ollama serve'),
+            ('litellm-proxy', 'litellm.*--config'),
         ]
         for label, pat in patterns:
             res = subprocess.run(['pgrep', '-f', pat], capture_output=True, text=True)

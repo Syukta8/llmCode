@@ -42,6 +42,15 @@ from src.common.rag import (
     index_workspace,
     retrieve_chunks,
 )
+from src.common.harness import (
+    HARNESSES,
+    get_harness,
+    build_launch_command,
+    context_warning,
+    CODEX_PROFILE,
+)
+from src.common.harness_config import write_codex_profile, DEFAULT_MCP_SERVERS
+from src.common.endpoint import resolve_base_url, stop_litellm_proxy, proxy_status
 
 # Auto-verify and sync paths in config/config.json on server startup
 _initial_cfg = sync_config()
@@ -52,10 +61,13 @@ PORT = int(os.environ.get('LLAMA_PORT', str(_initial_cfg.get('settings', {}).get
 lock = threading.RLock()
 proc = None
 log_handle = None
+harness_procs: Dict[str, List[Dict[str, Any]]] = {
+    'opencode': [],
+    'claude': [],
+    'codex': [],
+}
 opencode_proc = None
-aider_proc = None
-opencode_procs: List[Dict[str, Any]] = []
-aider_procs: List[Dict[str, Any]] = []
+opencode_procs: List[Dict[str, Any]] = harness_procs['opencode']
 _binary_flags_cache: Dict[str, Tuple[float, Set[str]]] = {}
 
 
@@ -367,7 +379,8 @@ class RAGQueryRequest(BaseModel):
     top_k: int = Field(default=6, ge=1, le=30)
 
 
-class OpenCodeLaunch(BaseModel):
+class HarnessLaunch(BaseModel):
+    harness: str = Field(default='opencode', pattern=r'^(opencode|claude|codex)$')
     project_dir: str
     model_path: str = ''
     backend: str = Field(default='llama.cpp', pattern=r'^(llama\.cpp|koboldcpp|ollama)$')
@@ -401,39 +414,8 @@ class OpenCodeLaunch(BaseModel):
     session_id: str = ''
 
 
-class AiderLaunch(BaseModel):
-    project_dir: str
-    model_path: str = ''
-    backend: str = Field(default='llama.cpp', pattern=r'^(llama\.cpp|koboldcpp|ollama)$')
-    alias: str = Field(default='llamacpp', pattern=r'^[a-zA-Z0-9_.-]{1,90}$')
-    layers: int = Field(default=8, ge=0, le=999)
-    context: int = Field(default=8192, ge=512, le=1048576)
-    parallel: int = Field(default=1, ge=1, le=32)
-    threads: int = Field(default=4, ge=1, le=256)
-    threads_batch: int = Field(default=6, ge=1, le=256)
-    batch: int = Field(default=2048, ge=32, le=65536)
-    ubatch: int = Field(default=256, ge=32, le=16384)
-    reasoning: bool = True
-    flash_attn: str = Field(default='on', pattern='^(on|off)$')
-    kv_cache: str = Field(default='q8_0', pattern='^(f16|q8_0|q4_0)$')
-    context_extend: str = Field(default='none', pattern=r'^(none|linear_2x|yarn_2x|yarn_4x|yarn_8x)$')
-    rag_enabled: bool = False
-    temp: float = Field(default=0.2, ge=0.0, le=2.0)
-    top_p: float = Field(default=0.95, ge=0.0, le=1.0)
-    top_k: int = Field(default=40, ge=0, le=500)
-    min_p: float = Field(default=0.05, ge=0.0, le=1.0)
-    repeat_penalty: float = Field(default=1.05, ge=0.0, le=3.0)
-    main_gpu: int = Field(default=0, ge=0, le=16)
-    split_mode: str = Field(default='layer', pattern='^(none|layer|row)$')
-    lan_access: bool = False
-    mtp_mode: str = Field(default='auto', pattern=r'^(auto|on|off)$')
-    spec_draft_n_max: int = Field(default=16, ge=1, le=64)
-    spec_draft_p_min: float = Field(default=0.75, ge=0.0, le=1.0)
-    mmproj_mode: str = Field(default='auto', pattern=r'^(auto|off)$')
-    custom_flags: str = ''
-    edit_format: str = Field(default='diff', pattern=r'^(diff|whole|udiff|architect)$')
-    restore_history: bool = False
-    history_file: str = ''
+class OpenCodeLaunch(HarnessLaunch):
+    pass
 
 
 class SequenceTaskItem(BaseModel):
@@ -484,7 +466,7 @@ def server_health():
 
 
 def system_status():
-    global opencode_procs, aider_procs
+    global harness_procs, opencode_proc
     gpu = {'available': False}
     try:
         if sys.platform == 'darwin':
@@ -582,8 +564,12 @@ def system_status():
         pass
 
     server_bin = get_llama_server_binary()
-    oc_alive = _prune_agent_procs(opencode_procs, opencode_proc)
-    ad_alive = _prune_agent_procs(aider_procs, aider_proc)
+    total_active_sessions = 0
+    for hid, procs in harness_procs.items():
+        legacy = opencode_proc if hid == 'opencode' else None
+        alive_procs = _prune_agent_procs(procs, legacy)
+        harness_procs[hid] = alive_procs
+        total_active_sessions += len(alive_procs)
     return {
         'gpu': gpu,
         'ram': mem,
@@ -595,8 +581,8 @@ def system_status():
         'server_port': PORT,
         'api_key': get_current_api_key(),
         'key_rotated_at': _key_rotated_at,
-        'agents_running': bool(oc_alive or ad_alive),
-        'agent_session_count': len(oc_alive) + len(ad_alive),
+        'agents_running': total_active_sessions > 0,
+        'agent_session_count': total_active_sessions,
         'platform': sys.platform,
     }
 
@@ -1156,6 +1142,7 @@ def start(params: Deploy):
 def stop():
     global proc, log_handle
     with lock:
+        stop_litellm_proxy()
         clear_api_key()
         if log_handle is not None:
             try:
@@ -1339,27 +1326,51 @@ def list_directories(base: str = ''):
     }
 
 
-@app.get('/api/opencode/status')
-def opencode_status():
-    global opencode_proc, opencode_procs
-    opencode_procs[:] = _prune_agent_procs(opencode_procs, opencode_proc)
-    running = len(opencode_procs) > 0
-    latest_pid = opencode_procs[-1]['pid'] if running else None
+@app.get('/api/harness/status')
+def all_harness_status():
+    global harness_procs, opencode_proc
     cfg = sync_config()
-    found_bin = cfg.get('agents', {}).get('opencode')
-    installed = bool(found_bin)
+    agents_cfg = cfg.get('agents', {})
+    res = {}
+    for hid, hobj in HARNESSES.items():
+        procs = harness_procs.setdefault(hid, [])
+        legacy = opencode_proc if hid == 'opencode' else None
+        alive_procs = _prune_agent_procs(procs, legacy)
+        harness_procs[hid] = alive_procs
+        running = len(alive_procs) > 0
+        found_bin = agents_cfg.get(hid)
+        res[hid] = {
+            'id': hid,
+            'label': hobj.label,
+            'api_style': hobj.api_style,
+            'running': running,
+            'pid': alive_procs[-1]['pid'] if running else None,
+            'session_count': len(alive_procs),
+            'installed': bool(found_bin),
+            'binary': found_bin,
+            'active_sessions': [
+                {'pid': s['pid'], 'project_dir': s.get('project_dir', ''), 'started_at': s.get('started_at', '')}
+                for s in alive_procs
+            ],
+        }
     return {
-        'running': running,
-        'pid': latest_pid,
-        'session_count': len(opencode_procs),
-        'active_sessions': [
-            {'pid': s['pid'], 'project_dir': s.get('project_dir', ''), 'started_at': s.get('started_at', '')}
-            for s in opencode_procs
-        ],
-        'installed': installed,
-        'binary': found_bin,
+        'harnesses': res,
+        'proxy': proxy_status(),
         'terminal': detect_terminal(),
     }
+
+
+@app.get('/api/harness/{harness_id}/status')
+def harness_status(harness_id: str):
+    if harness_id not in HARNESSES:
+        raise HTTPException(400, f"Unknown harness '{harness_id}'")
+    st = all_harness_status()
+    return {**st['harnesses'][harness_id], 'terminal': st['terminal']}
+
+
+@app.get('/api/opencode/status')
+def opencode_status():
+    return harness_status('opencode')
 
 
 def ensure_git_ignored(project_dir: Path, filename: str = 'opencode.json') -> None:
@@ -1473,31 +1484,13 @@ def write_opencode_config(
 
     # Ensure standard MCP servers for coding, research, and automation are pre-configured (disabled by default)
     mcp_servers = data.setdefault('mcp', {})
-    default_mcps = {
-        'fetch': {
-            'type': 'local',
-            'enabled': False,
-            'command': ['uvx', 'mcp-server-fetch'],
-        },
-        'context7': {
-            'type': 'local',
-            'enabled': False,
-            'command': ['npx', '-y', '@upstash/context7-mcp'],
-        },
-        'sequential-thinking': {
-            'type': 'local',
-            'enabled': False,
-            'command': ['npx', '-y', '@modelcontextprotocol/server-sequential-thinking'],
-        },
-        'playwright': {
-            'type': 'local',
-            'enabled': False,
-            'command': ['npx', '-y', '@playwright/mcp@latest'],
-        },
-    }
-    for mcp_name, mcp_cfg in default_mcps.items():
+    for mcp_name, cmd_args in DEFAULT_MCP_SERVERS.items():
         if mcp_name not in mcp_servers:
-            mcp_servers[mcp_name] = mcp_cfg
+            mcp_servers[mcp_name] = {
+                'type': 'local',
+                'enabled': False,
+                'command': cmd_args,
+            }
 
     cfg_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
 
@@ -1512,10 +1505,12 @@ def write_opencode_config(
     return cfg_path
 
 
-@app.post('/api/opencode/launch')
-def launch_opencode(params: OpenCodeLaunch):
-    """Auto-start backend server if needed, configure opencode.json with standard alias, then spawn opencode CLI."""
-    global opencode_proc, proc, log_handle
+def launch_harness_by_id(harness_id: str, params: HarnessLaunch) -> Dict[str, Any]:
+    """Auto-start backend server if needed, configure harness, then spawn CLI in terminal."""
+    global harness_procs, opencode_proc, proc, log_handle
+
+    if harness_id not in HARNESSES:
+        raise HTTPException(400, f"Unknown harness '{harness_id}'. Choose one of: {', '.join(HARNESSES)}")
 
     project = Path(params.project_dir).expanduser().resolve()
     if not project.is_dir():
@@ -1575,152 +1570,93 @@ def launch_opencode(params: OpenCodeLaunch):
         index_workspace(project)
         rag_file = RAG_CONTEXT_FILE
 
-    write_opencode_config(project, params.alias, PORT, rag_context_file=rag_file, context_limit=params.context)
-
     cfg = sync_config()
-    oc_bin = cfg.get('agents', {}).get('opencode') or 'npx @opencode/cli@latest'
-    oc_cmd = (f'"{oc_bin}"' if ' ' in str(oc_bin) and not str(oc_bin).startswith('npx ') else f'{oc_bin}') + ' --auto'
-    if params.restore_history:
-        if params.session_id.strip():
-            oc_cmd += f' --session {params.session_id.strip()}'
-        else:
-            oc_cmd += ' --continue'
-    os.environ['OPENCODE_DISABLE_CLAUDE_CODE_SKILLS'] = '1'
-    opencode_proc = spawn_in_terminal(oc_cmd, cwd=project, title="OpenCode v2 CLI")
-    opencode_procs[:] = _prune_agent_procs(opencode_procs)
-    opencode_procs.append({
-        'pid': opencode_proc.pid,
-        'proc': opencode_proc,
+    curr_api_key = get_current_api_key()
+    warning_msg = None
+    procs = harness_procs.setdefault(harness_id, [])
+
+    if harness_id == 'opencode':
+        write_opencode_config(project, params.alias, PORT, rag_context_file=rag_file, context_limit=params.context)
+        oc_bin = cfg.get('agents', {}).get('opencode') or 'npx @opencode/cli@latest'
+        cmd = (f'"{oc_bin}"' if ' ' in str(oc_bin) and not str(oc_bin).startswith('npx ') else f'{oc_bin}') + ' --auto'
+        if params.restore_history:
+            if params.session_id.strip():
+                cmd += f' --session {params.session_id.strip()}'
+            else:
+                cmd += ' --continue'
+        os.environ['OPENCODE_DISABLE_CLAUDE_CODE_SKILLS'] = '1'
+        h_proc = spawn_in_terminal(cmd, cwd=project, title="OpenCode v2 CLI")
+        opencode_proc = h_proc
+
+    elif harness_id == 'claude':
+        claude_bin = cfg.get('agents', {}).get('claude')
+        if not claude_bin:
+            raise HTTPException(400, 'Claude Code binary not found in venv or PATH. Run setup first.')
+        base_url, ep_mode = resolve_base_url('anthropic', PORT, params.alias, curr_api_key)
+        warning_msg = context_warning('claude', params.context)
+        cmd = build_launch_command(
+            'claude',
+            claude_bin,
+            params.alias,
+            base_url,
+            restore=params.restore_history,
+            session_id=params.session_id,
+            key_file=API_KEY_FILE,
+        )
+        h_proc = spawn_in_terminal(cmd, cwd=project, title="Claude Code CLI")
+
+    elif harness_id == 'codex':
+        codex_bin = cfg.get('agents', {}).get('codex')
+        if not codex_bin:
+            raise HTTPException(400, 'Codex binary not found in venv or PATH. Run setup first.')
+        base_url, ep_mode = resolve_base_url('responses', PORT, params.alias, curr_api_key)
+        warning_msg = context_warning('codex', params.context)
+        write_codex_profile(HOME, base_url, params.alias, context=params.context)
+        cmd = build_launch_command(
+            'codex',
+            codex_bin,
+            params.alias,
+            base_url,
+            restore=params.restore_history,
+            session_id=params.session_id,
+            key_file=API_KEY_FILE,
+        )
+        h_proc = spawn_in_terminal(cmd, cwd=project, title="Codex CLI")
+
+    procs[:] = _prune_agent_procs(procs)
+    procs.append({
+        'pid': h_proc.pid,
+        'proc': h_proc,
         'project_dir': str(project),
         'started_at': datetime.now().isoformat(timespec='seconds'),
     })
+
+    label = HARNESSES[harness_id].label
+    msg = f'{label} launching in terminal (model: {params.alias}).'
+    if warning_msg:
+        msg += f' Warning: {warning_msg}'
+
     return {
         'ok': True,
-        'message': f'OpenCode v2 CLI launching in terminal (model: llmcode/{params.alias}).',
+        'harness': harness_id,
+        'message': msg,
+        'warning': warning_msg,
         'terminal': terminal,
         'project_dir': str(project),
-        'opencode_pid': opencode_proc.pid,
-        'session_count': len(opencode_procs),
+        'pid': h_proc.pid,
+        'session_count': len(procs),
     }
 
 
-@app.get('/api/aider/status')
-def aider_status():
-    global aider_proc, aider_procs
-    aider_procs[:] = _prune_agent_procs(aider_procs, aider_proc)
-    running = len(aider_procs) > 0
-    latest_pid = aider_procs[-1]['pid'] if running else None
-    cfg = sync_config()
-    found_bin = cfg.get('agents', {}).get('aider')
-    installed = bool(found_bin)
-    return {
-        'running': running,
-        'pid': latest_pid,
-        'session_count': len(aider_procs),
-        'active_sessions': [
-            {'pid': s['pid'], 'project_dir': s.get('project_dir', ''), 'started_at': s.get('started_at', '')}
-            for s in aider_procs
-        ],
-        'installed': installed,
-        'binary': found_bin if installed else None,
-        'terminal': detect_terminal(),
-    }
+@app.post('/api/harness/{harness_id}/launch')
+def launch_harness_endpoint(harness_id: str, params: HarnessLaunch):
+    params.harness = harness_id
+    return launch_harness_by_id(harness_id, params)
 
 
-@app.post('/api/aider/launch')
-def launch_aider(params: AiderLaunch):
-    """Auto-start backend server if needed, then spawn aider in a terminal."""
-    global aider_proc, aider_procs, proc, log_handle
-
-    project = Path(params.project_dir).expanduser().resolve()
-    if not project.is_dir():
-        raise HTTPException(400, f'Project directory does not exist: {project}')
-
-    terminal = detect_terminal()
-    if not terminal:
-        raise HTTPException(400, 'No supported terminal emulator found')
-
-    cfg = sync_config()
-    aider_bin = cfg.get('agents', {}).get('aider')
-    if not aider_bin:
-        raise HTTPException(400, 'Aider CLI binary not found in venv or PATH. Run setup first.')
-
-    std_alias = get_standard_alias(params.backend)
-    if not params.alias or params.alias in ('local-qwen', 'llamacpp', 'koboldcpp', 'ollama'):
-        params.alias = std_alias
-
-    with lock:
-        health = server_health()
-        if health is None and not alive():
-            model_path = params.model_path or load_settings().get('last_model_path', '')
-            if not model_path:
-                raise HTTPException(400, 'No model selected and no last-used model found. Pick a model first.')
-            path = safe_model_path(model_path)
-            launch_backend_process(params.backend, path, params)
-
-    save_settings({
-        'last_model_path': params.model_path or load_settings().get('last_model_path', ''),
-        'last_backend': params.backend,
-        'last_alias': params.alias,
-        'last_layers': params.layers,
-        'last_context': params.context,
-        'last_parallel': params.parallel,
-        'last_threads': params.threads,
-        'last_threads_batch': params.threads_batch,
-        'last_batch': params.batch,
-        'last_ubatch': params.ubatch,
-        'last_flash_attn': params.flash_attn,
-        'last_kv_cache': params.kv_cache,
-        'last_context_extend': params.context_extend,
-        'last_rag_enabled': params.rag_enabled,
-        'last_temp': params.temp,
-        'last_top_p': params.top_p,
-        'last_top_k': params.top_k,
-        'last_min_p': params.min_p,
-        'last_repeat_penalty': params.repeat_penalty,
-        'last_main_gpu': params.main_gpu,
-        'last_split_mode': params.split_mode,
-        'last_lan_access': params.lan_access,
-        'last_reasoning': params.reasoning,
-        'last_mtp_mode': params.mtp_mode,
-        'last_spec_draft_n_max': params.spec_draft_n_max,
-        'last_spec_draft_p_min': params.spec_draft_p_min,
-        'last_mmproj_mode': params.mmproj_mode,
-        'last_custom_flags': ' '.join(sanitize_managed_custom_flags(params.custom_flags.split())),
-        'last_project_dir': str(project),
-        'last_edit_format': params.edit_format,
-    })
-
-    if not AGENT_ENV_FILE.is_file():
-        raise HTTPException(400, 'Agent environment file not found (config/agent.env). Deploy backend server first.')
-
-    model_arg = f'openai/{params.alias}'
-    edit_arg = f'--edit-format {params.edit_format}'
-    aider_cmd = f'"{aider_bin}" --env-file "{AGENT_ENV_FILE}" --model {model_arg} {edit_arg} --stream --dark-mode --auto-accept-architect --yes-always --auto-commits'
-    if params.rag_enabled:
-        index_workspace(project)
-        aider_cmd += f' --read "{RAG_CONTEXT_FILE}"'
-    if params.restore_history:
-        aider_cmd += ' --restore-chat-history'
-    if params.history_file.strip():
-        aider_cmd += f' --chat-history-file {params.history_file.strip()}'
-
-    aider_proc = spawn_in_terminal(aider_cmd, cwd=project, title="Aider CLI")
-    aider_procs[:] = _prune_agent_procs(aider_procs)
-    aider_procs.append({
-        'pid': aider_proc.pid,
-        'proc': aider_proc,
-        'project_dir': str(project),
-        'started_at': datetime.now().isoformat(timespec='seconds'),
-    })
-    return {
-        'ok': True,
-        'message': 'Aider CLI launching in terminal. Connecting to local server.',
-        'terminal': terminal,
-        'project_dir': str(project),
-        'aider_pid': aider_proc.pid,
-        'session_count': len(aider_procs),
-    }
+@app.post('/api/opencode/launch')
+def launch_opencode(params: OpenCodeLaunch):
+    return launch_harness_by_id('opencode', params)
 
 
 _sequence_state: Dict[str, Any] = {

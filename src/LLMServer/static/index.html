@@ -354,16 +354,16 @@
       </div>
     </div>
     <div class="telemetry-card">
-      <span class="status-dot" id="aiderDot"></span>
+      <span class="status-dot" id="harnessDot"></span>
       <div class="telemetry-meta">
-        <span class="telemetry-label">Coding Assistant (Aider)</span>
-        <span class="telemetry-val" id="aiderText">...</span>
+        <span class="telemetry-label">Coding Harnesses</span>
+        <span class="telemetry-val" id="harnessText">...</span>
       </div>
     </div>
   </div>
 
   <div id="keyRotatedBanner" style="display:none; background:#ff444422; border:1px solid #ff444466; color:#ff8888; padding:8px 14px; border-radius:6px; margin-bottom:14px; font-size:12.5px; align-items:center; justify-content:space-between;">
-    <span><strong>API Key Rotated:</strong> Backend restarted with a fresh API key. Active Aider or OpenCode terminal sessions will get 401 until relaunched.</span>
+    <span><strong>API Key Rotated:</strong> Backend restarted with a fresh API key. Active OpenCode, Claude Code, or Codex terminal sessions will get 401 until relaunched.</span>
     <button class="subtle" onclick="$('keyRotatedBanner').style.display='none'" style="padding:2px 8px; font-size:11px;">Dismiss</button>
   </div>
 
@@ -604,8 +604,9 @@
     <div class="card-header">
       <div class="card-title">Coding Integrations & Workspace</div>
       <div class="btn-group">
-        <button class="primary" onclick="launchAider()">Launch Aider</button>
-        <button class="subtle" onclick="launchOpenCode()">Launch OpenCode</button>
+        <button class="primary" onclick="launchHarness('opencode')">Launch OpenCode</button>
+        <button class="subtle" onclick="launchHarness('claude')">Launch Claude Code</button>
+        <button class="subtle" onclick="launchHarness('codex')">Launch Codex</button>
       </div>
     </div>
     <div class="form-grid">
@@ -617,15 +618,6 @@
         </div>
         <div id="dirBrowser" class="dir-browser" style="display:none"></div>
       </div>
-      <div class="field">
-        <label>Aider Edit Format</label>
-        <select id="editFormat">
-          <option value="diff" selected>diff (Standard recommended)</option>
-          <option value="whole">whole (Entire file replacement)</option>
-          <option value="udiff">udiff (Unified diff)</option>
-          <option value="architect">architect (Two-stage editor)</option>
-        </select>
-      </div>
       <div class="field" style="grid-column: span 2;">
         <label>Chat Session History</label>
         <div style="display:flex; align-items:center; gap:10px; height:38px;">
@@ -634,9 +626,9 @@
           </label>
         </div>
       </div>
-      <div class="field" style="grid-column: span 2;">
-        <label>Custom History File or Session ID <span class="badge">Optional</span></label>
-        <input id="historyTarget" class="mono" placeholder=".aider.chat.history.md or OpenCode session ID">
+      <div class="field" style="grid-column: span 3;">
+        <label>Custom Session ID or Resume Token <span class="badge">Optional</span></label>
+        <input id="historyTarget" class="mono" placeholder="Session ID or resume token (optional)">
       </div>
     </div>
 
@@ -864,15 +856,29 @@ async function refreshStatus() {
   }
 }
 
-async function refreshAider() {
+async function refreshHarnesses() {
   try {
-    let a = await api('/aider/status');
-    if (a.running) {
-      $('aiderDot').className = 'status-dot online';
-      $('aiderText').textContent = `Running (pid ${a.pid})`;
+    let d = await api('/harness/status');
+    let harnesses = d.harnesses || {};
+    let anyRunning = false;
+    let installedList = [];
+    let runningList = [];
+    for (let hid in harnesses) {
+      let h = harnesses[hid];
+      if (h.running) {
+        anyRunning = true;
+        runningList.push(`${h.label} (${h.session_count})`);
+      }
+      if (h.installed) {
+        installedList.push(h.label);
+      }
+    }
+    if (anyRunning) {
+      $('harnessDot').className = 'status-dot online';
+      $('harnessText').textContent = runningList.join(', ');
     } else {
-      $('aiderDot').className = 'status-dot offline';
-      $('aiderText').textContent = a.installed ? 'Installed & Ready' : 'Not Installed';
+      $('harnessDot').className = 'status-dot offline';
+      $('harnessText').textContent = installedList.length ? installedList.join(' · ') : 'None Installed';
     }
   } catch(e) {}
 }
@@ -1284,42 +1290,31 @@ async function stopServer() {
   }
 }
 
-async function launchAider() {
+async function launchHarness(harnessId) {
   let dir = $('projectDir').value.trim();
   if (!dir) { toast('Please specify a project directory'); return; }
   try {
     let payload = Object.assign(getDeployPayload(), {
-      project_dir: dir,
-      model_path: $('chosenModel').value,
-      edit_format: $('editFormat').value,
-      restore_history: $('restoreHistory').checked,
-      history_file: $('historyTarget').value.trim(),
-    });
-    let d = await post('/aider/launch', payload);
-    toast(d.message);
-    refreshStatus();
-    refreshAider();
-  } catch(e) {
-    toast('Aider Launch: ' + e.message);
-  }
-}
-
-async function launchOpenCode() {
-  let dir = $('projectDir').value.trim();
-  if (!dir) { toast('Please specify a project directory'); return; }
-  try {
-    let payload = Object.assign(getDeployPayload(), {
+      harness: harnessId,
       project_dir: dir,
       model_path: $('chosenModel').value,
       restore_history: $('restoreHistory').checked,
       session_id: $('historyTarget').value.trim(),
     });
-    let d = await post('/opencode/launch', payload);
+    let d = await post('/harness/' + harnessId + '/launch', payload);
     toast(d.message);
+    if (d.warning) {
+      setTimeout(() => toast('Warning: ' + d.warning), 1500);
+    }
     refreshStatus();
+    refreshHarnesses();
   } catch(e) {
-    toast('OpenCode Launch: ' + e.message);
+    toast((harnessId || 'Harness') + ' Launch: ' + e.message);
   }
+}
+
+async function launchOpenCode() {
+  return launchHarness('opencode');
 }
 
 function toggleDirBrowser() {
@@ -1500,7 +1495,7 @@ async function clearLogs() {
 }
 
 async function init() {
-  await Promise.all([refreshStatus(), refreshAider(), loadModels(), loadDownloads(), loadLogs()]);
+  await Promise.all([refreshStatus(), refreshHarnesses(), loadModels(), loadDownloads(), loadLogs()]);
   pollDownloadsLoop();
   try {
     let s = await api('/settings');
@@ -1541,13 +1536,12 @@ async function init() {
       $('custom_flags').value = s.last_custom_flags;
       sanitizeCustomFlagsInput();
     }
-    if (s.last_edit_format) $('editFormat').value = s.last_edit_format;
     onModelSelectionChange();
   } catch(e) {}
 }
 
 init();
-setInterval(() => { refreshStatus(); refreshAider(); loadLogs(); }, 4000);
+setInterval(() => { refreshStatus(); refreshHarnesses(); loadLogs(); }, 4000);
 </script>
 </body>
 </html>

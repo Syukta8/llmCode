@@ -3,7 +3,7 @@
 Lightweight, zero-external-dependency Workspace RAG indexer and retriever for llmCode.
 Scans project source files, splits them into semantic line-bounded chunks, builds a
 BM25/TF-IDF lexical index stored in `config/rag_index.json`, and generates a compact
-`config/rag_context.md` summary for Aider, OpenCode, and API retrieval queries.
+`config/rag_context.md` summary for OpenCode, Claude Code, Codex, and API retrieval queries.
 """
 import json
 import math
@@ -207,7 +207,7 @@ def retrieve_chunks(query: str, top_k: int = 6, project_dir: Optional[Path] = No
 def generate_rag_context_file(project_dir: Path, query: str = '', top_k: int = 6, index_data: Optional[Dict[str, Any]] = None) -> Path:
     """
     Writes `config/rag_context.md` containing the repository file tree summary and
-    top retrieved code chunks so coding agents (Aider / OpenCode) get high-signal context
+    top retrieved code chunks so coding agents (OpenCode / Claude / Codex) get high-signal context
     without overflowing the context window.
     """
     if index_data is None:

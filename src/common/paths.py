@@ -262,22 +262,6 @@ def _discover_ollama() -> Path:
     return candidates[0]
 
 
-def _discover_aider() -> Optional[str]:
-    """Discovers aider CLI executable prioritizing llm-dash venv (.venv/bin or .venv/Scripts)."""
-    exe = get_executable_name('aider')
-    venv_dir = SRC_DIR / 'LLMServer' / '.venv'
-    candidates = [
-        venv_dir / ('Scripts' if os.name == 'nt' else 'bin') / exe,
-        Path.home() / '.local' / 'bin' / exe,
-        Path.home() / 'AppData' / 'Roaming' / 'Python' / 'Scripts' / exe,
-    ]
-    for c in candidates:
-        if c.is_file():
-            return str(c.resolve())
-    found = shutil.which('aider')
-    return str(Path(found).resolve()) if found else None
-
-
 def parse_version_tuple(version_str: str) -> Tuple[int, int, int]:
     """Extracts (major, minor, patch) integers from a CLI --version output string."""
     import re
@@ -336,14 +320,52 @@ def _discover_opencode() -> Optional[str]:
     return None
 
 
+# Floors for npm-scoped harness CLIs; older builds lack the custom-endpoint flags llmCode relies on.
+HARNESS_MIN_VERSIONS: Dict[str, Tuple[int, int, int]] = {
+    'claude': (1, 0, 0),
+    'codex': (0, 40, 0),
+}
+
+
+def _discover_npm_harness(name: str) -> Optional[str]:
+    """Discovers an npm-installed harness CLI (`claude`, `codex`) prioritizing llm-dash .venv, enforcing HARNESS_MIN_VERSIONS."""
+    venv_dir = SRC_DIR / 'LLMServer' / '.venv'
+    venv_bin_dir = venv_dir / ('Scripts' if os.name == 'nt' else 'bin')
+    shim = f'{name}.cmd' if os.name == 'nt' else name
+    candidates = [venv_bin_dir / shim, venv_dir / 'node_modules' / '.bin' / shim]
+    found = shutil.which(name)
+    if found:
+        candidates.append(Path(found))
+    floor = HARNESS_MIN_VERSIONS.get(name, (0, 0, 0))
+    for c in candidates:
+        if not c.is_file():
+            continue
+        try:
+            target = str(c.resolve()) if c.suffix.lower() not in ('.cmd', '.bat') else str(c)
+            argv = ['cmd.exe', '/c', target, '--version'] if os.name == 'nt' and target.lower().endswith(('.cmd', '.bat')) else [target, '--version']
+            res = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+            if res.returncode == 0 and parse_version_tuple((res.stdout or '') + (res.stderr or '')) >= floor:
+                return str(c)
+        except Exception:
+            pass
+    return None
+
+
+def discover_agents() -> Dict[str, Any]:
+    """Builds the `agents` config section for every supported harness (opencode, claude, codex)."""
+    out: Dict[str, Any] = {}
+    for name, fn in (('opencode', _discover_opencode), ('claude', lambda: _discover_npm_harness('claude')), ('codex', lambda: _discover_npm_harness('codex'))):
+        b = fn()
+        out[name] = b
+        out[f'{name}_installed'] = bool(b)
+    return out
+
+
 def _default_config() -> Dict[str, Any]:
     """Returns default schema for config/config.json, tuned by config/hardware.json if present."""
     llama_bin = _discover_llama_server()
     kobold_bin = _discover_koboldcpp()
     ollama_bin = _discover_ollama()
-    aider_bin = _discover_aider()
-    opencode_bin = _discover_opencode()
-
     hw = load_hardware()
     rt = hw.get('runtime_defaults', {})
 
@@ -368,12 +390,7 @@ def _default_config() -> Dict[str, Any]:
             'ollama': str(ollama_bin),
             'ollama_exists': ollama_bin.is_file(),
         },
-        'agents': {
-            'aider': aider_bin,
-            'aider_installed': bool(aider_bin),
-            'opencode': opencode_bin,
-            'opencode_installed': bool(opencode_bin),
-        },
+        'agents': discover_agents(),
         'settings': {
             'dash_port': int(os.environ.get('LLAMA_PORT_DASH', '7860')),
             'server_port': int(os.environ.get('LLAMA_PORT', '8080')),
@@ -485,14 +502,7 @@ def sync_config(apply_hardware_defaults: bool = False) -> Dict[str, Any]:
             'ollama_exists': ollama_bin.is_file(),
         }
 
-        aider_bin = _discover_aider()
-        opencode_bin = _discover_opencode()
-        cfg['agents'] = {
-            'aider': aider_bin,
-            'aider_installed': bool(aider_bin),
-            'opencode': opencode_bin,
-            'opencode_installed': bool(opencode_bin),
-        }
+        cfg['agents'] = discover_agents()
 
         # Apply hardware-tuned runtime defaults when requested or on first initialization
         hw = load_hardware()

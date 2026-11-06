@@ -27,7 +27,7 @@ from src.common.paths import (
     LOG_FILE,
     MODEL_DIR,
     PID_FILE,
-    _discover_opencode,
+    discover_agents,
     build_binary_env,
     get_koboldcpp_binary,
     get_llama_server_binary,
@@ -151,14 +151,19 @@ def cmd_check_update(args):
     steps = res['steps']
     changed = res['changed_files']
 
-    # Always verify that OpenCode v2 (>= 2.0.0) is present in .venv even on incremental runs
+    # Always verify that coding agent harnesses are present in .venv even on incremental runs
     venv_dir = REPO_ROOT / 'src' / 'LLMServer' / '.venv'
-    if not _discover_opencode():
+    agents = discover_agents()
+    if not agents.get('opencode_installed'):
         from src.build.setup_binaries import _install_opencode_into_venv, setup_opencode_orchestrator
         print("OpenCode v2 (>= 2.0.0) not detected or legacy v1 present; upgrading to OpenCode v2 in .venv...")
         _install_opencode_into_venv(venv_dir)
         setup_opencode_orchestrator()
-        sync_config(apply_hardware_defaults=False)
+    for h_name in ('claude', 'codex'):
+        if not agents.get(f'{h_name}_installed'):
+            from src.build.setup_binaries import _install_npm_harness
+            _install_npm_harness(venv_dir, h_name)
+    sync_config(apply_hardware_defaults=False)
 
     if not steps:
         print("✓ All deployment components are up to date with repository state.")
@@ -443,19 +448,62 @@ def cmd_stop(args):
     return 0
 
 
-def cmd_aider(args):
-    """Spawn Aider connected to the running local server in an interactive terminal."""
-    if not AGENT_ENV_FILE.is_file():
-        print(f"Error: Agent environment credentials not found at {AGENT_ENV_FILE}.")
-        print("Deploy a backend engine first via web dashboard before launching Aider.")
+def cmd_harness(args):
+    """Spawn a coding agent harness (opencode, claude, codex) connected to the running local server."""
+    harness_id = getattr(args, 'harness', '') or args.command
+    if not API_KEY_FILE.is_file() and not AGENT_ENV_FILE.is_file():
+        print("Error: Local backend server not running or credentials missing.")
+        print(f"Deploy a backend engine first before launching {harness_id.title()}.")
         return 1
+
     cfg = sync_config()
-    aider_bin = cfg.get('agents', {}).get('aider') or 'aider'
+    agent_bin = cfg.get('agents', {}).get(harness_id)
+    if not agent_bin:
+        print(f"Error: {harness_id} binary not found in .venv or PATH. Run setup first.")
+        return 1
+
     alias = cfg.get('settings', {}).get('last_alias') or 'llamacpp'
+    port = int(args.port or cfg.get('settings', {}).get('server_port', 8080))
+    context = int(cfg.get('settings', {}).get('last_context', 8192))
     target_dir = Path(args.dir).expanduser().resolve()
-    aider_cmd = f'"{aider_bin}" --env-file "{AGENT_ENV_FILE}" --model openai/{alias} --stream'
-    print(f"Launching Aider in {target_dir} (model: openai/{alias})...")
-    spawn_in_terminal(aider_cmd, cwd=target_dir, title="llmCode Aider")
+    restore = getattr(args, 'continue_session', False)
+    session_id = getattr(args, 'session', '') or ''
+
+    from src.common.harness import HARNESSES, build_launch_command, context_warning
+    from src.common.harness_config import write_codex_profile
+    from src.common.endpoint import resolve_base_url
+    from src.LLMServer.app import write_opencode_config
+
+    api_key = API_KEY_FILE.read_text(encoding='utf-8').strip() if API_KEY_FILE.is_file() else ''
+
+    if harness_id == 'opencode':
+        write_opencode_config(target_dir, alias, port, context_limit=context)
+        cmd = (f'"{agent_bin}"' if ' ' in str(agent_bin) and not str(agent_bin).startswith('npx ') else f'{agent_bin}') + ' --auto'
+        if session_id:
+            cmd += f' --session {session_id}'
+        elif restore:
+            cmd += ' --continue'
+        os.environ['OPENCODE_DISABLE_CLAUDE_CODE_SKILLS'] = '1'
+
+    elif harness_id == 'claude':
+        base_url, _ = resolve_base_url('anthropic', port, alias, api_key)
+        warn = context_warning('claude', context)
+        if warn:
+            print(f"Warning: {warn}")
+        cmd = build_launch_command('claude', agent_bin, alias, base_url, restore=restore, session_id=session_id)
+
+    elif harness_id == 'codex':
+        base_url, _ = resolve_base_url('responses', port, alias, api_key)
+        warn = context_warning('codex', context)
+        if warn:
+            print(f"Warning: {warn}")
+        write_codex_profile(Path.home(), base_url, alias, context=context)
+        cmd = build_launch_command('codex', agent_bin, alias, base_url, restore=restore, session_id=session_id)
+
+    label = HARNESSES.get(harness_id, None)
+    label_str = label.label if label else harness_id
+    print(f"Launching {label_str} in {target_dir} (model: {alias})...")
+    spawn_in_terminal(cmd, cwd=target_dir, title=f"llmCode {label_str}")
     return 0
 
 
@@ -560,11 +608,14 @@ def main():
     p_stop = subparsers.add_parser("stop", help="Stop llm-dash and active backend servers")
     p_stop.set_defaults(func=cmd_stop)
 
-    # aider
-    p_aider = subparsers.add_parser("aider", help="Launch Aider CLI")
-    p_aider.add_argument("--dir", default=".", help="Project directory")
-    p_aider.add_argument("--port", type=int, default=8080, help="Server port")
-    p_aider.set_defaults(func=cmd_aider)
+    # coding agent harnesses: opencode, claude, codex
+    for h_id, h_label in [('opencode', 'OpenCode CLI'), ('claude', 'Claude Code CLI'), ('codex', 'Codex CLI')]:
+        p_h = subparsers.add_parser(h_id, help=f"Launch {h_label}")
+        p_h.add_argument("--dir", default=".", help="Project directory")
+        p_h.add_argument("--port", type=int, default=0, help="Server port (0 = use saved port)")
+        p_h.add_argument("--continue", dest="continue_session", action="store_true", help="Continue previous session")
+        p_h.add_argument("--session", default="", help="Specific session ID or resume token")
+        p_h.set_defaults(func=cmd_harness, harness=h_id)
 
     # sequence
     p_seq = subparsers.add_parser("sequence", help="Run multiple prompts in parallel across active server slots")

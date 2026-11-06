@@ -3,13 +3,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Unified local LLM server and coding station supporting **Windows**, **Linux**, and **macOS**.
-Scans your hardware & packages into `config/hardware.json`, auto-tunes `llama.cpp`, `KoboldCpp`, and `Ollama` compilation & settings, installs **Aider** and **OpenCode** inside the `llm-dash` virtual environment, and configures **VS Code Continue** with standard aliases (`llamacpp`, `koboldcpp`, `ollama`).
+Scans your hardware & packages into `config/hardware.json`, auto-tunes `llama.cpp`, `KoboldCpp`, and `Ollama` compilation & settings, installs **OpenCode**, **Claude Code**, and **Codex** inside the `llm-dash` virtual environment, and configures **VS Code Continue** with standard aliases (`llamacpp`, `koboldcpp`, `ollama`).
 
 <p align="center">
   <img src="assets/demo.gif" alt="llmCode Demo" width="100%" />
 </p>
 <p align="center">
-  <em>Local LLM station: auto-hardware scan, auto-tuned compilation, and instant Aider / OpenCode agent integration. (<a href="assets/demo.mp4">Download 1080p MP4</a>)</em>
+  <em>Local LLM station: auto-hardware scan, auto-tuned compilation, and instant OpenCode / Claude Code / Codex agent integration. (<a href="assets/demo.mp4">Download 1080p MP4</a>)</em>
 </p>
 
 ---
@@ -17,7 +17,7 @@ Scans your hardware & packages into `config/hardware.json`, auto-tunes `llama.cp
 ## 1. Windows Setup & Usage
 
 ```cmd
-:: 1. Scan hardware, compile/download backends, install Aider & OpenCode in .venv, configure Continue
+:: 1. Scan hardware, compile/download backends, install OpenCode, Claude Code & Codex in .venv, configure Continue
 :: (Automatically performs incremental updates after git pull; use --full to force complete setup)
 setup.bat
 
@@ -36,7 +36,7 @@ setup.bat --uninstall
 ## 2. Linux Setup & Usage
 
 ```bash
-# 1. Scan hardware, compile/download backends, install Aider & OpenCode in .venv, configure Continue
+# 1. Scan hardware, compile/download backends, install OpenCode, Claude Code & Codex in .venv, configure Continue
 # (Automatically performs incremental updates after git pull; use --full to force complete setup)
 ./setup.sh
 
@@ -55,7 +55,7 @@ setup.bat --uninstall
 ## 3. macOS Setup & Usage
 
 ```bash
-# 1. Scan hardware (Apple Metal), compile/download backends, install Aider & OpenCode in .venv, configure Continue
+# 1. Scan hardware (Apple Metal), compile/download backends, install OpenCode, Claude Code & Codex in .venv, configure Continue
 # (Automatically performs incremental updates after git pull; use --full to force complete setup)
 ./setup.sh
 
