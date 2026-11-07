@@ -127,7 +127,8 @@ def cmd_setup(args):
     subprocess.run([py_exe, '-m', 'pip', 'install', '-q', '--no-warn-script-location', '-r', str(server_dir / 'requirements.txt')], check=True)
 
     from src.build.setup_binaries import main as run_binary_setup
-    run_binary_setup(non_interactive=getattr(args, 'non_interactive', False))
+    non_int = getattr(args, 'non_interactive', False) or getattr(args, 'yes', False)
+    run_binary_setup(non_interactive=non_int)
 
     sync_config(apply_hardware_defaults=True)
     from src.build.deploy_state import save_deploy_state
@@ -136,10 +137,36 @@ def cmd_setup(args):
     return 0
 
 
+def _reinstall_module_pip(py_exe: str, server_dir: Path):
+    print("\n[Module: pip] Updating dashboard requirements...")
+    subprocess.run([py_exe, '-m', 'pip', 'install', '-q', '--no-warn-script-location', '-r', str(server_dir / 'requirements.txt')], check=True)
+
+
+def _reinstall_module_engines(non_interactive: bool):
+    from src.build.setup_binaries import main as run_engine_setup
+    print("\n[Module: engines] Running backend engine setup...")
+    run_engine_setup(non_interactive=non_interactive)
+
+
+def _reinstall_module_agents(py_exe: str, non_interactive: bool):
+    from src.build.setup_binaries import install_cli_agents, setup_opencode_orchestrator
+    print("\n[Module: agents] Installing CLI coding agents in .venv...")
+    install_cli_agents(py_exe, non_interactive=non_interactive)
+    setup_opencode_orchestrator()
+
+
+def _reinstall_module_configs(non_interactive: bool):
+    from src.build.setup_binaries import setup_agent_configs, setup_continue_config
+    print("\n[Module: configs] Configuring Claude Code, Codex, and Continue...")
+    setup_agent_configs(non_interactive=non_interactive)
+    setup_continue_config(non_interactive=non_interactive)
+    sync_config(apply_hardware_defaults=True)
+
+
 def cmd_check_update(args):
     """
     Analyzes current git status / file differences against last deployment state
-    and executes only the necessary update steps (pip, config_sync, engines, restart_dashboard).
+    and prompts user with a numbered menu to reinstall affected or selected modules.
     """
     from src.build.deploy_state import diff_components, save_deploy_state
     res = diff_components(REPO_ROOT)
@@ -165,53 +192,99 @@ def cmd_check_update(args):
             _install_npm_harness(venv_dir, h_name)
     sync_config(apply_hardware_defaults=False)
 
-    if not steps:
-        print("✓ All deployment components are up to date with repository state.")
-        save_deploy_state(REPO_ROOT)
-        return 0
-
-    print("=== llmCode Incremental Update Check ===")
-    print(f"Detected {len(changed)} changed file(s):")
-    for f in changed[:10]:
-        print(f"  • {f}")
-    if len(changed) > 10:
-        print(f"  ... and {len(changed) - 10} more.")
-
-    print(f"\nAffected update step(s): {', '.join(steps)}")
     non_interactive = getattr(args, 'yes', False) or getattr(args, 'non_interactive', False)
-
-    if 'full' in steps:
-        print("\nCore setup script or CLI changed. Running full setup...")
-        return cmd_setup(args)
-
     py_exe = get_python_exe()
     server_dir = REPO_ROOT / 'src' / 'LLMServer'
 
-    if 'pip' in steps:
-        print("\n[Step: pip] Updating dashboard requirements...")
-        subprocess.run([py_exe, '-m', 'pip', 'install', '-q', '--no-warn-script-location', '-r', str(server_dir / 'requirements.txt')], check=True)
+    if not steps and not changed:
+        print("✓ All deployment components are up to date with repository state.")
+        if non_interactive:
+            save_deploy_state(REPO_ROOT)
+            return 0
+        ans = input("Do you want to reinstall any modules anyway? [y/N]: ").strip().lower()
+        if ans not in ('y', 'yes'):
+            save_deploy_state(REPO_ROOT)
+            return 0
+        choice = '2'
+    else:
+        print("=== llmCode Incremental Update Check ===")
+        print(f"Detected {len(changed)} changed file(s):")
+        for f in changed[:10]:
+            print(f"  • {f}")
+        if len(changed) > 10:
+            print(f"  ... and {len(changed) - 10} more.")
 
-    if 'config_sync' in steps:
-        print("\n[Step: config_sync] Synchronizing configuration database and paths...")
-        sync_config(apply_hardware_defaults=True)
+        print(f"\nAffected update step(s): {', '.join(steps) if steps else 'None'}")
 
-    if 'desktop_entry' in steps:
-        from src.build.setup_binaries import render_desktop_entry
-        print("\n[Step: desktop_entry] Updating desktop application entry...")
-        render_desktop_entry(REPO_ROOT)
-
-    if 'engines' in steps:
-        print("\n[Step: engines] Backend engine build scripts changed.")
-        print("  Estimated time: Compiling from source may take several minutes; prebuilt binaries take < 1 min.")
-        proceed = True
-        if not non_interactive:
-            ans = input("Re-run backend engine setup now? [y/N]: ").strip().lower()
-            proceed = ans in ('y', 'yes')
-        if proceed:
-            from src.build.setup_binaries import main as run_engine_setup
-            run_engine_setup(non_interactive=non_interactive)
+        if non_interactive:
+            choice = '1'
         else:
-            print("Skipping engine update.")
+            print("\nSelect an update action:")
+            print("  [1] Reinstall all affected / changed modules (Recommended)")
+            print("  [2] Select specific modules to reinstall")
+            print("  [3] Full clean reinstall (re-run complete setup)")
+            print("  [4] Skip reinstall")
+            choice = input("Enter choice [1]: ").strip() or '1'
+
+    if choice == '3':
+        print("\nRunning full setup from scratch...")
+        return cmd_setup(args)
+    elif choice == '4':
+        print("\nReinstall skipped.")
+        save_deploy_state(REPO_ROOT)
+        return 0
+    elif choice == '2':
+        print("\nSelect modules to reinstall (comma-separated, e.g. 1,3 or 'all'):")
+        print("  [1] Python dependencies (requirements.txt)")
+        print("  [2] Backend engines (llama.cpp, koboldcpp, ollama)")
+        print("  [3] Coding agent CLIs (OpenCode, Claude, Codex in .venv)")
+        print("  [4] Agent & Editor configurations (Claude settings.json, Codex TOML, Continue)")
+        sub_input = input("Enter selection [1,4]: ").strip() or "1,4"
+        sub_choices = set()
+        if sub_input.lower() in ('all', 'a', '*'):
+            sub_choices = {'1', '2', '3', '4'}
+        else:
+            for item in sub_input.replace(' ', ',').split(','):
+                item = item.strip()
+                if item:
+                    sub_choices.add(item)
+        if '1' in sub_choices:
+            _reinstall_module_pip(py_exe, server_dir)
+        if '2' in sub_choices:
+            _reinstall_module_engines(non_interactive)
+        if '3' in sub_choices:
+            _reinstall_module_agents(py_exe, non_interactive)
+        if '4' in sub_choices:
+            _reinstall_module_configs(non_interactive)
+    else:  # choice == '1'
+        if 'full' in steps:
+            print("\nCore setup script or CLI changed. Running full setup...")
+            return cmd_setup(args)
+
+        if 'pip' in steps:
+            _reinstall_module_pip(py_exe, server_dir)
+
+        if 'config_sync' in steps:
+            print("\n[Step: config_sync] Synchronizing configuration database and paths...")
+            sync_config(apply_hardware_defaults=True)
+            _reinstall_module_configs(non_interactive)
+
+        if 'desktop_entry' in steps:
+            from src.build.setup_binaries import render_desktop_entry
+            print("\n[Step: desktop_entry] Updating desktop application entry...")
+            render_desktop_entry(REPO_ROOT)
+
+        if 'engines' in steps:
+            print("\n[Step: engines] Backend engine build scripts changed.")
+            print("  Estimated time: Compiling from source may take several minutes; prebuilt binaries take < 1 min.")
+            proceed = True
+            if not non_interactive:
+                ans = input("Re-run backend engine setup now? [y/N]: ").strip().lower()
+                proceed = ans in ('y', 'yes')
+            if proceed:
+                _reinstall_module_engines(non_interactive)
+            else:
+                print("Skipping engine update.")
 
     if 'restart_dashboard' in steps:
         # Check if services are currently running
@@ -470,7 +543,11 @@ def cmd_harness(args):
     session_id = getattr(args, 'session', '') or ''
 
     from src.common.harness import HARNESSES, build_launch_command, context_warning
-    from src.common.harness_config import write_codex_profile
+    from src.common.harness_config import (
+        write_claude_settings,
+        write_codex_default_config,
+        write_codex_profile,
+    )
     from src.common.endpoint import resolve_base_url
     from src.LLMServer.app import write_opencode_config
 
@@ -490,6 +567,7 @@ def cmd_harness(args):
         warn = context_warning('claude', context)
         if warn:
             print(f"Warning: {warn}")
+        write_claude_settings(Path.home(), base_url, alias, context=context)
         cmd = build_launch_command('claude', agent_bin, alias, base_url, restore=restore, session_id=session_id)
 
     elif harness_id == 'codex':
@@ -498,6 +576,7 @@ def cmd_harness(args):
         if warn:
             print(f"Warning: {warn}")
         write_codex_profile(Path.home(), base_url, alias, context=context)
+        write_codex_default_config(Path.home(), base_url, alias, context=context)
         cmd = build_launch_command('codex', agent_bin, alias, base_url, restore=restore, session_id=session_id)
 
     label = HARNESSES.get(harness_id, None)

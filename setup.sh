@@ -31,6 +31,28 @@ done
 
 echo "=== llmCode Full Setup ($OS_NAME) ==="
 
+# Auto-check git remote updates if repository exists
+if [[ -d "$SCRIPT_DIR/.git" ]] && command -v git &>/dev/null; then
+    echo "Checking for remote updates via git..."
+    if git -C "$SCRIPT_DIR" fetch --quiet 2>/dev/null; then
+        LOCAL_SHA="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo "")"
+        UPSTREAM_SHA="$(git -C "$SCRIPT_DIR" rev-parse '@{u}' 2>/dev/null || echo "")"
+        if [[ -n "$UPSTREAM_SHA" ]] && [[ "$LOCAL_SHA" != "$UPSTREAM_SHA" ]]; then
+            echo ""
+            echo "=========================================================="
+            echo " New updates detected from git remote repository!"
+            echo "=========================================================="
+            read -r -p "Run 'git pull' now before continuing setup? [Y/n]: " pull_ans
+            if [[ -z "$pull_ans" || "$pull_ans" =~ ^[Yy]$ ]]; then
+                echo "Pulling latest changes..."
+                git -C "$SCRIPT_DIR" pull --ff-only || {
+                    echo "Warning: git pull failed (conflict or uncommitted changes). Continuing..."
+                }
+            fi
+        fi
+    fi
+fi
+
 # 1. Discover compatible Python (preferring 3.12 -> 3.11 -> 3.10 for prebuilt agent wheels)
 PYTHON_BIN=""
 for candidate in python3.12 python3.11 python3.10; do

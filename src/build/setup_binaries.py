@@ -1580,6 +1580,24 @@ def setup_continue_config(continue_dir: Optional[Path] = None, port: int = 8080,
     return None
 
 
+def setup_agent_configs(home: Optional[Path] = None, port: int = 8080, non_interactive: bool = False) -> Dict[str, Path]:
+    """
+    Configures Claude Code (~/.claude/settings.json) and Codex (~/.codex/config.toml & llmcode.config.toml)
+    with model=llamacpp, bypassPermissions, and llmdash context size.
+    """
+    from src.common.harness_config import setup_all_agent_configs
+    print("\n=== Coding Agent Configurations (Claude Code & Codex) ===")
+    try:
+        written = setup_all_agent_configs(home=home, port=port, non_interactive=non_interactive)
+        print(f"  ✓ Claude Code settings : {written.get('claude')} (model=llamacpp, permissions=bypassPermissions)")
+        print(f"  ✓ Codex profile        : {written.get('codex_profile')} (model=llamacpp, approval_policy=never)")
+        print(f"  ✓ Codex default config : {written.get('codex_config')}")
+        return written
+    except Exception as e:
+        print(f"  Warning: failed to configure agent profiles: {e}")
+        return {}
+
+
 def render_desktop_entry(repo_root: Path = REPO_ROOT) -> Optional[Path]:
     """Renders bin/llmCode.desktop from bin/llmCode.desktop.in with absolute paths."""
     in_file = repo_root / 'bin' / 'llmCode.desktop.in'
@@ -1756,6 +1774,9 @@ def main(non_interactive: bool = False, uninstall: bool = False):
 
     # 6.5. Deploy OpenCode orchestrator skill
     setup_opencode_orchestrator()
+
+    # 6.6. Configure Claude Code and Codex profiles with llamacpp model, bypassPermissions, and llmdash context
+    setup_agent_configs(non_interactive=non_interactive)
 
     # 7. Render desktop entry template with absolute paths
     render_desktop_entry()

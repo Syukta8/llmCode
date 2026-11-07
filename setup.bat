@@ -29,6 +29,31 @@ set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 
 echo === llmCode Full Setup (Windows) ===
 
+REM Auto-check git remote updates if repository exists
+if exist "%SCRIPT_DIR%.git" (
+    where git >nul 2>&1
+    if !errorlevel! equ 0 (
+        echo Checking for remote repository updates via git...
+        git -C "%SCRIPT_DIR%" fetch --quiet 2>nul
+        set "LOCAL_SHA="
+        set "UPSTREAM_SHA="
+        for /f "tokens=*" %%H in ('git -C "%SCRIPT_DIR%" rev-parse HEAD 2^>nul') do set "LOCAL_SHA=%%H"
+        for /f "tokens=*" %%U in ('git -C "%SCRIPT_DIR%" rev-parse @{u} 2^>nul') do set "UPSTREAM_SHA=%%U"
+        if defined UPSTREAM_SHA if not "!LOCAL_SHA!"=="!UPSTREAM_SHA!" (
+            echo.
+            echo ==========================================================
+            echo  New updates detected from git remote repository!
+            echo ==========================================================
+            set /p "PULL_ANS=Run 'git pull' now before continuing setup? [Y/n]: "
+            if not defined PULL_ANS set "PULL_ANS=y"
+            if /i "!PULL_ANS!"=="y" (
+                echo Pulling latest changes...
+                git -C "%SCRIPT_DIR%" pull --ff-only
+            )
+        )
+    )
+)
+
 set "BASE_PY="
 py -3.12 --version >nul 2>&1 && set "BASE_PY=py -3.12"
 if not defined BASE_PY py -3.11 --version >nul 2>&1 && set "BASE_PY=py -3.11"
