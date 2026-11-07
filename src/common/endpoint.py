@@ -103,6 +103,9 @@ def ensure_litellm_proxy(engine_url: str, engine_port: int, alias: str, api_key:
             'LLMCODE_ENGINE_KEY': api_key,
             'LITELLM_MASTER_KEY': api_key,
             'LITELLM_DANGEROUSLY_PERMIT_WEAK_OR_UNSET_MASTER_KEY': 'true',
+            # LiteLLM >=1.10x routes openai/ Anthropic traffic via /v1/responses, which skips the
+            # system-message merge that Qwen-style templates need; force chat/completions.
+            'LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES': 'true',
         }
         log = open(PROXY_LOG_FILE, 'a', encoding='utf-8')
         _proxy['proc'] = subprocess.Popen(
