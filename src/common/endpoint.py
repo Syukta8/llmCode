@@ -70,7 +70,13 @@ def _proxy_yaml(engine_url: str, alias: str) -> str:
             f'      api_base: {json.dumps(engine_url.rstrip("/") + "/v1")}\n'
             f'      api_key: os.environ/LLMCODE_ENGINE_KEY\n'
         )
-    return 'model_list:\n' + ''.join(entries) + 'litellm_settings:\n  drop_params: true\n'
+    return (
+        'model_list:\n' + ''.join(entries) +
+        'litellm_settings:\n  drop_params: true\n'
+        'general_settings:\n'
+        '  master_key: os.environ/LLMCODE_ENGINE_KEY\n'
+        '  dangerously_permit_weak_or_unset_master_key: true\n'
+    )
 
 
 def _litellm_bin() -> Path:
@@ -92,7 +98,12 @@ def ensure_litellm_proxy(engine_url: str, engine_port: int, alias: str, api_key:
             raise RuntimeError('LiteLLM proxy not installed in .venv; rerun setup (litellm[proxy]).')
         PROXY_CONFIG_FILE.write_text(_proxy_yaml(engine_url, alias), encoding='utf-8')
         PROXY_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        env = {**os.environ, 'LLMCODE_ENGINE_KEY': api_key}
+        env = {
+            **os.environ,
+            'LLMCODE_ENGINE_KEY': api_key,
+            'LITELLM_MASTER_KEY': api_key,
+            'LITELLM_DANGEROUSLY_PERMIT_WEAK_OR_UNSET_MASTER_KEY': 'true',
+        }
         log = open(PROXY_LOG_FILE, 'a', encoding='utf-8')
         _proxy['proc'] = subprocess.Popen(
             [str(exe), '--config', str(PROXY_CONFIG_FILE), '--host', '127.0.0.1', '--port', str(port)],
