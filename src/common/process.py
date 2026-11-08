@@ -52,7 +52,7 @@ def spawn_in_terminal(command_str: str, cwd: Path, title: str = "llmCode") -> su
         if terminal.lower() == 'wt.exe':
             args = ['wt.exe', '-d', cwd_str, 'cmd.exe', '/k', command_str]
         elif terminal.lower() == 'powershell.exe':
-            args = ['powershell.exe', '-NoExit', '-Command', f"Set-Location '{cwd_str}'; {command_str}"]
+            args = ['powershell.exe', '-NoExit', '-Command', f"Set-Location -LiteralPath '{cwd_str}'; cmd.exe /k \"{command_str}\""]
         else:
             args = ['cmd.exe', '/c', 'start', title, '/D', cwd_str, 'cmd.exe', '/k', command_str]
         return subprocess.Popen(args, cwd=cwd_str, shell=True)

@@ -564,6 +564,7 @@ def _pkg_install_cmd(plat: str, tool: str) -> List[str]:
             ],
             'go': ['winget', 'install', '--id', 'GoLang.Go', '-e', '--source', 'winget'],
             'cuda': ['winget', 'install', '--id', 'Nvidia.CUDA', '-e', '--source', 'winget'],
+            'nodejs': ['winget', 'install', '--id', 'OpenJS.NodeJS.LTS', '-e', '--source', 'winget'],
         }
         return mapping.get(tool, [])
 
@@ -575,6 +576,7 @@ def _pkg_install_cmd(plat: str, tool: str) -> List[str]:
             'cmake': ['brew', 'install', 'cmake'],
             'ninja': ['brew', 'install', 'ninja'],
             'go': ['brew', 'install', 'go'],
+            'nodejs': ['brew', 'install', 'node'],
         }
         return mapping.get(tool, [])
 
@@ -588,9 +590,13 @@ def _pkg_install_cmd(plat: str, tool: str) -> List[str]:
                 'make': 'make',
                 'go': 'golang-go',
                 'cuda': 'nvidia-cuda-toolkit',
+                'nodejs': 'nodejs npm',
             }
             pkg = pkg_map.get(tool)
-            return ['sudo', 'apt-get', 'install', '-y', pkg] if pkg else []
+            if not pkg:
+                return []
+            pkgs = pkg.split()
+            return ['sudo', 'apt-get', 'install', '-y'] + pkgs
         elif shutil.which('dnf'):
             pkg_map = {
                 'git': 'git',
@@ -600,9 +606,13 @@ def _pkg_install_cmd(plat: str, tool: str) -> List[str]:
                 'make': 'make',
                 'go': 'golang',
                 'cuda': 'cuda-toolkit',
+                'nodejs': 'nodejs npm',
             }
             pkg = pkg_map.get(tool)
-            return ['sudo', 'dnf', 'install', '-y', pkg] if pkg else []
+            if not pkg:
+                return []
+            pkgs = pkg.split()
+            return ['sudo', 'dnf', 'install', '-y'] + pkgs
         elif shutil.which('pacman'):
             pkg_map = {
                 'git': 'git',
@@ -612,9 +622,13 @@ def _pkg_install_cmd(plat: str, tool: str) -> List[str]:
                 'make': 'make',
                 'go': 'go',
                 'cuda': 'cuda',
+                'nodejs': 'nodejs npm',
             }
             pkg = pkg_map.get(tool)
-            return ['sudo', 'pacman', '-S', '--noconfirm', pkg] if pkg else []
+            if not pkg:
+                return []
+            pkgs = pkg.split()
+            return ['sudo', 'pacman', '-S', '--noconfirm'] + pkgs
         return []
 
 
@@ -1185,7 +1199,85 @@ def is_binary_runnable(bin_path: Path, min_version: Tuple[int, int, int] = (0, 0
         return False
 
 
-def _install_opencode_into_venv(venv_dir: Path) -> bool:
+def _find_existing_harness(name: str, venv_dir: Path) -> Optional[Tuple[Path, Tuple[int, int, int], str]]:
+    """
+    Checks if a compatible harness binary (`claude`, `codex`, `opencode`) already exists on the system outside .venv.
+    Returns (binary_path, version_tuple, version_str) if found and meeting HARNESS_MIN_VERSIONS floor; else None.
+    """
+    from src.common.paths import HARNESS_MIN_VERSIONS
+    floor = HARNESS_MIN_VERSIONS.get(name, (0, 0, 0))
+    resolved_venv = venv_dir.resolve()
+
+    candidates: List[Path] = []
+    which_bin = shutil.which(name)
+    if which_bin:
+        candidates.append(Path(which_bin))
+
+    # Check common system bin locations if missing from current shell PATH
+    if os.name != 'nt':
+        home = Path.home()
+        for extra in [
+            home / '.local' / 'bin' / name,
+            home / '.npm-global' / 'bin' / name,
+            Path('/usr/local/bin') / name,
+        ]:
+            if extra.is_file() and extra not in candidates:
+                candidates.append(extra)
+    else:
+        appdata = os.environ.get('APPDATA')
+        if appdata:
+            npm_win = Path(appdata) / 'npm' / f'{name}.cmd'
+            if npm_win.is_file() and npm_win not in candidates:
+                candidates.append(npm_win)
+
+    for cand in candidates:
+        try:
+            cand_resolved = cand.resolve()
+            if resolved_venv in cand_resolved.parents or resolved_venv == cand_resolved:
+                continue
+
+            target_str = str(cand_resolved) if cand.suffix.lower() not in ('.cmd', '.bat') else str(cand)
+            argv = ['cmd.exe', '/c', target_str, '--version'] if os.name == 'nt' and target_str.lower().endswith(('.cmd', '.bat')) else [target_str, '--version']
+            res = subprocess.run(argv, capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                raw_out = (res.stdout or '') + (res.stderr or '')
+                ver = parse_version_tuple(raw_out)
+                if ver != (0, 0, 0) and ver >= floor:
+                    first_line = raw_out.strip().splitlines()[0] if raw_out.strip() else f"v{ver[0]}.{ver[1]}.{ver[2]}"
+                    return cand, ver, first_line
+        except Exception:
+            continue
+    return None
+
+
+def _link_existing_harness_into_venv(venv_dir: Path, name: str, existing_bin: Path) -> bool:
+    """
+    Creates a symlink or executable wrapper shim inside `<venv_dir>/bin` or `<venv_dir>/Scripts`
+    pointing to `existing_bin`, avoiding duplicate npm installations.
+    """
+    from src.common.paths import HARNESS_MIN_VERSIONS
+    floor = HARNESS_MIN_VERSIONS.get(name, (0, 0, 0))
+    is_win = os.name == 'nt' or get_platform_name() == 'windows'
+    venv_bin_dir = venv_dir / ('Scripts' if is_win else 'bin')
+    venv_bin_dir.mkdir(parents=True, exist_ok=True)
+
+    target = venv_bin_dir / (f'{name}.cmd' if is_win else name)
+    target.unlink(missing_ok=True)
+
+    if is_win:
+        resolved_str = str(existing_bin.resolve() if existing_bin.is_file() else existing_bin)
+        target.write_text(f'@echo off\r\n"{resolved_str}" %*\r\n', encoding='utf-8')
+    else:
+        try:
+            target.symlink_to(existing_bin)
+        except OSError:
+            target.write_text(f'#!/usr/bin/env bash\nexec "{existing_bin.resolve()}" "$@"\n', encoding='utf-8')
+            target.chmod(0o755)
+
+    return is_binary_runnable(target, min_version=floor)
+
+
+def _install_opencode_into_venv(venv_dir: Path, non_interactive: bool = False) -> bool:
     """
     Installs OpenCode v2 CLI (`@opencode/cli@latest`, >= 2.0.0 architecture) directly inside the
     llm-dash virtualenv (`.venv/bin/opencode` on Linux/macOS or `.venv/Scripts/opencode.exe` on Windows).
@@ -1248,6 +1340,23 @@ def _install_opencode_into_venv(venv_dir: Path) -> bool:
                 return True
             print(f"Existing OpenCode binary at {existing_candidate} is legacy v1 (< 2.0.0) or failed check; upgrading to OpenCode v2...")
             existing_candidate.unlink(missing_ok=True)
+
+    # Check for existing system OpenCode installation outside .venv
+    existing_sys = _find_existing_harness('opencode', venv_dir)
+    if existing_sys:
+        sys_bin, sys_ver, sys_str = existing_sys
+        print(f"\nFound existing OpenCode v2 CLI on system: {sys_bin} ({sys_str})")
+        ans = _prompt_choice(
+            "Link existing OpenCode v2 to avoid re-downloading via npm? (y/n)",
+            ['y', 'yes', 'n', 'no'],
+            default='y',
+            non_interactive=non_interactive,
+        )
+        if ans in ('y', 'yes'):
+            if _link_existing_harness_into_venv(venv_dir, 'opencode', sys_bin):
+                print(f"Linked existing OpenCode v2 CLI into venv.")
+                return True
+            print("Linking failed; falling back to fresh installation...")
 
     # 1. Primary: install OpenCode v2 via npm scoped to venv_dir (`npm install --prefix <venv_dir> @opencode/cli@latest`)
     npm_exe = shutil.which('npm')
@@ -1381,11 +1490,11 @@ NPM_HARNESS_PACKAGES = {
 }
 
 
-def _install_npm_harness(venv_dir: Path, name: str) -> bool:
+def _install_npm_harness(venv_dir: Path, name: str, non_interactive: bool = False) -> bool:
     """
     Installs an npm harness CLI (`claude`, `codex`) scoped to the llm-dash .venv (`npm install --prefix <venv>`)
-    and exposes it as `.venv/bin/<name>` (symlink) or `.venv/Scripts/<name>.cmd` (wrapper) so discovery and
-    PATH-free launches work identically to OpenCode.
+    or links to an existing system installation, and exposes it as `.venv/bin/<name>` (symlink)
+    or `.venv/Scripts/<name>.cmd` (wrapper) so discovery and PATH-free launches work identically to OpenCode.
     """
     from src.common.paths import HARNESS_MIN_VERSIONS
     pkg = NPM_HARNESS_PACKAGES[name]
@@ -1397,6 +1506,24 @@ def _install_npm_harness(venv_dir: Path, name: str) -> bool:
     if (target.is_file() or target.is_symlink()) and is_binary_runnable(target, min_version=floor):
         print(f"{name} CLI already present and runnable in venv at {target}")
         return True
+
+    # Check for existing system installation outside .venv
+    existing_sys = _find_existing_harness(name, venv_dir)
+    if existing_sys:
+        sys_bin, sys_ver, sys_str = existing_sys
+        print(f"\nFound existing {name} CLI on system: {sys_bin} ({sys_str})")
+        ans = _prompt_choice(
+            f"Link existing {name} to avoid re-downloading via npm? (y/n)",
+            ['y', 'yes', 'n', 'no'],
+            default='y',
+            non_interactive=non_interactive,
+        )
+        if ans in ('y', 'yes'):
+            if _link_existing_harness_into_venv(venv_dir, name, sys_bin):
+                print(f"Linked existing {name} CLI into venv at {target}.")
+                return True
+            print("Linking failed; falling back to fresh installation...")
+
     npm_exe = shutil.which('npm')
     if not npm_exe:
         print(f"npm not found; install Node.js >= 18 (https://nodejs.org) then rerun setup to get {pkg}.")
@@ -1432,6 +1559,31 @@ def _purge_aider(venv_python: str, venv_dir: Path) -> None:
     aider_bin.unlink(missing_ok=True)
 
 
+def _ensure_npm_available(non_interactive: bool = False) -> Optional[str]:
+    """Ensures npm is available, offering package manager auto-install if missing."""
+    npm_exe = shutil.which('npm')
+    if npm_exe:
+        return npm_exe
+    plat = get_platform()
+    cmd = _pkg_install_cmd(plat, 'nodejs')
+    if not cmd:
+        return None
+    print("\nNode.js and npm are required for Claude Code, Codex, and npm-based MCP servers.")
+    ans = _prompt_choice(
+        f"Install Node.js & npm via {' '.join(cmd[:3])}? (y/n)",
+        ['y', 'yes', 'n', 'no'],
+        default='y',
+        non_interactive=non_interactive,
+    )
+    if ans in ('y', 'yes'):
+        print(f"Running: {' '.join(cmd)}...")
+        try:
+            subprocess.run(cmd, check=False)
+        except Exception as e:
+            print(f"Failed to run package manager for Node.js: {e}")
+    return shutil.which('npm')
+
+
 def _ensure_litellm_proxy(venv_python: str) -> bool:
     """Installs `litellm[proxy]`, the Anthropic/Responses translation layer for engines lacking native endpoints."""
     res = subprocess.run([venv_python, '-c', 'import litellm.proxy.proxy_server'], capture_output=True)
@@ -1439,6 +1591,137 @@ def _ensure_litellm_proxy(venv_python: str) -> bool:
         return True
     print("Installing LiteLLM proxy (litellm[proxy]) into llm-dash .venv...")
     return subprocess.run([venv_python, '-m', 'pip', 'install', '-q', '--no-warn-script-location', 'litellm[proxy]'], check=False).returncode == 0
+
+
+def setup_mcp_servers(non_interactive: bool = False) -> Dict[str, Any]:
+    """
+    Configures optional Model Context Protocol (MCP) servers across OpenCode, Claude Code, and Codex.
+    Follows a 2-tier design:
+      - Tier 1: 8 Zero-config local servers (uvx / npx)
+      - Tier 2: 4 Cloud / API-key servers (GitHub, Brave Search, Tavily, Firecrawl)
+    Strict opt-in: writes only selected servers; persists to config/config.json under 'mcp'.
+    """
+    from src.common.harness_config import (
+        DEFAULT_MCP_CATALOG,
+        write_claude_mcp_config,
+        write_codex_profile,
+    )
+    from src.LLMServer.app import write_opencode_config
+    from src.common.paths import load_config
+
+    print("\n=== Model Context Protocol (MCP) Servers Setup (Optional) ===")
+    print("MCP servers give your coding agents (OpenCode, Claude Code, Codex) tools for")
+    print("web fetching, library docs search, browser automation, and deep reasoning.\n")
+
+    tier1_keys = [k for k, v in DEFAULT_MCP_CATALOG.items() if v.get('tier') == 1]
+    tier2_keys = [k for k, v in DEFAULT_MCP_CATALOG.items() if v.get('tier') == 2]
+
+    selected_servers: Dict[str, Dict[str, Any]] = {}
+
+    if non_interactive:
+        cfg = load_config()
+        mcp_data = cfg.get('mcp', {})
+        enabled = mcp_data.get('enabled_servers', [])
+        saved_servers = mcp_data.get('servers', {})
+        if enabled:
+            selected_servers = {k: v for k, v in saved_servers.items() if k in enabled}
+    else:
+        print("[Tier 1] Zero-Config Coding & Research Servers (No API keys needed):")
+        for i, k in enumerate(tier1_keys, 1):
+            spec = DEFAULT_MCP_CATALOG[k]
+            cmd = spec['command']
+            desc = spec['description']
+            print(f"  [{i}] {k:20s} - {desc} ({cmd})")
+        print("\nTier 1 options:")
+        print("  [A] Enable ALL 8 Tier 1 servers (Recommended)")
+        print("  [C] Custom select specific servers (comma-separated, e.g. 1,2,3,4)")
+        print("  [S] Skip Tier 1 servers")
+
+        ans = _prompt_choice("Select Tier 1 option (A/C/S)", ['a', 'all', 'c', 'custom', 's', 'skip'], default='a', non_interactive=non_interactive).lower()
+
+        chosen_tier1 = []
+        if ans in ('a', 'all'):
+            chosen_tier1 = tier1_keys
+        elif ans in ('c', 'custom'):
+            try:
+                raw_pick = input("Enter numbers to enable (e.g. 1,2,4,5): ").strip()
+                for part in raw_pick.replace(' ', ',').split(','):
+                    if part.isdigit():
+                        idx = int(part) - 1
+                        if 0 <= idx < len(tier1_keys):
+                            chosen_tier1.append(tier1_keys[idx])
+            except (EOFError, KeyboardInterrupt):
+                chosen_tier1 = []
+
+        for k in chosen_tier1:
+            spec = DEFAULT_MCP_CATALOG[k]
+            selected_servers[k] = {
+                'command': spec['command'],
+                'args': list(spec['args']),
+            }
+
+        print("\n[Tier 2] Cloud & API-Key Coding & Research Servers (Optional):")
+        for k in tier2_keys:
+            spec = DEFAULT_MCP_CATALOG[k]
+            desc = spec['description']
+            env_var = spec.get('env_var', '')
+            print(f"  - {k:15s} : {desc} (env: {env_var})")
+
+        ans2 = _prompt_choice("Configure Tier 2 cloud servers? (y/n)", ['y', 'yes', 'n', 'no'], default='n', non_interactive=non_interactive).lower()
+        if ans2 in ('y', 'yes'):
+            for k in tier2_keys:
+                spec = DEFAULT_MCP_CATALOG[k]
+                env_var = spec.get('env_var', '')
+                try:
+                    val = input(f"Enter API key for {k} (or press Enter to set via ${env_var} later, or 'skip'): ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    val = 'skip'
+                if val.lower() != 'skip':
+                    entry: Dict[str, Any] = {
+                        'command': spec['command'],
+                        'args': list(spec['args']),
+                    }
+                    if val:
+                        entry['env'] = {env_var: val}
+                    selected_servers[k] = entry
+
+    cfg_file = REPO_ROOT / 'config' / 'config.json'
+    if cfg_file.is_file():
+        try:
+            cfg_obj = json.loads(cfg_file.read_text(encoding='utf-8'))
+        except Exception:
+            cfg_obj = {}
+        cfg_obj['mcp'] = {
+            'enabled_servers': list(selected_servers.keys()),
+            'servers': selected_servers,
+        }
+        cfg_file.write_text(json.dumps(cfg_obj, indent=2) + '\n', encoding='utf-8')
+
+    alias = 'llamacpp'
+    port = 8080
+    context = 16384
+    try:
+        cfg = load_config()
+        alias = cfg.get('settings', {}).get('last_alias') or alias
+        port = int(cfg.get('settings', {}).get('server_port') or port)
+        context = int(cfg.get('settings', {}).get('last_context') or context)
+    except Exception:
+        pass
+
+    user_home = Path.home()
+    base_url = f'http://127.0.0.1:{port}'
+
+    write_opencode_config(REPO_ROOT, alias, port, context_limit=context, mcp_servers=selected_servers)
+    write_codex_profile(user_home, base_url, alias, context=context, mcp_servers=selected_servers)
+    write_claude_mcp_config(user_home, mcp_servers=selected_servers)
+
+    enabled_list = list(selected_servers.keys())
+    if enabled_list:
+        print(f"Configured and enabled {len(enabled_list)} MCP servers across OpenCode, Claude Code, and Codex: {', '.join(enabled_list)}")
+    else:
+        print("MCP servers: strict opt-in retained (0 servers enabled across harnesses).")
+
+    return selected_servers
 
 
 def install_cli_agents(venv_python: str, non_interactive: bool = False):
@@ -1455,13 +1738,17 @@ def install_cli_agents(venv_python: str, non_interactive: bool = False):
 
     if choice in ('1', '2'):
         print("\nInstalling OpenCode CLI into llm-dash .venv...")
-        _install_opencode_into_venv(venv_dir)
+        _install_opencode_into_venv(venv_dir, non_interactive=non_interactive)
         setup_opencode_orchestrator()
 
     if choice in ('1', '3'):
+        _ensure_npm_available(non_interactive)
         _ensure_litellm_proxy(venv_python)
         for name in NPM_HARNESS_PACKAGES:
-            _install_npm_harness(venv_dir, name)
+            _install_npm_harness(venv_dir, name, non_interactive=non_interactive)
+
+    if choice in ('1', '2', '3'):
+        setup_mcp_servers(non_interactive=non_interactive)
 
 
 def setup_opencode_orchestrator():

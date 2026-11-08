@@ -17,6 +17,7 @@ VENV_PIP="$VENV_DIR/bin/pip"
 
 # Handle --uninstall before touching or creating .venv
 IS_FULL=0
+NON_INTERACTIVE=0
 PASSTHROUGH_ARGS=()
 for arg in "$@"; do
     if [[ "$arg" == "--uninstall" ]]; then
@@ -24,6 +25,9 @@ for arg in "$@"; do
         exit 0
     elif [[ "$arg" == "--full" ]]; then
         IS_FULL=1
+    elif [[ "$arg" == "-y" || "$arg" == "--yes" || "$arg" == "--non-interactive" ]]; then
+        NON_INTERACTIVE=1
+        PASSTHROUGH_ARGS+=("$arg")
     else
         PASSTHROUGH_ARGS+=("$arg")
     fi
@@ -42,20 +46,27 @@ if [[ -d "$SCRIPT_DIR/.git" ]] && command -v git &>/dev/null; then
             echo "=========================================================="
             echo " New updates detected from git remote repository!"
             echo "=========================================================="
-            read -r -p "Run 'git pull' now before continuing setup? [Y/n]: " pull_ans
-            if [[ -z "$pull_ans" || "$pull_ans" =~ ^[Yy]$ ]]; then
-                echo "Pulling latest changes..."
+            if [[ "$NON_INTERACTIVE" == "1" || ! -t 0 ]]; then
+                echo "Non-interactive run detected: pulling latest changes..."
                 git -C "$SCRIPT_DIR" pull --ff-only || {
                     echo "Warning: git pull failed (conflict or uncommitted changes). Continuing..."
                 }
+            else
+                read -r -p "Run 'git pull' now before continuing setup? [Y/n]: " pull_ans
+                if [[ -z "$pull_ans" || "$pull_ans" =~ ^[Yy]$ ]]; then
+                    echo "Pulling latest changes..."
+                    git -C "$SCRIPT_DIR" pull --ff-only || {
+                        echo "Warning: git pull failed (conflict or uncommitted changes). Continuing..."
+                    }
+                fi
             fi
         fi
     fi
 fi
 
-# 1. Discover compatible Python (preferring 3.12 -> 3.11 -> 3.10 for prebuilt agent wheels)
+# 1. Discover compatible Python (preferring 3.12 -> 3.11 -> 3.10 -> 3.13 for prebuilt agent wheels)
 PYTHON_BIN=""
-for candidate in python3.12 python3.11 python3.10; do
+for candidate in python3.12 python3.11 python3.10 python3.13; do
     if command -v "$candidate" &>/dev/null; then
         PYTHON_BIN="$(command -v "$candidate")"
         break

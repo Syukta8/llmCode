@@ -86,6 +86,7 @@ def build_launch_command(
     restore: bool = False,
     session_id: str = '',
     key_file: Path = API_KEY_FILE,
+    settings_file: Optional[Path] = None,
 ) -> str:
     """Returns the full terminal command (env prefix + CLI) for Claude Code or Codex."""
     session_id = session_id.strip()
@@ -95,6 +96,9 @@ def build_launch_command(
     if harness_id == 'claude':
         env = claude_env(base_url, alias)
         cmd = exe
+        if settings_file and settings_file.is_file():
+            quoted_settings = f'"{settings_file.resolve()}"' if ' ' in str(settings_file.resolve()) else str(settings_file.resolve())
+            cmd += f' --settings {quoted_settings}'
         if session_id:
             cmd += f' --resume {session_id}'
         elif restore:

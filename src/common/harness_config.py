@@ -19,13 +19,107 @@ from src.common.harness import CODEX_KEY_ENV, CODEX_PROFILE
 BLOCK_BEGIN = '# >>> llmcode managed block (do not edit; rewritten on every launch) >>>'
 BLOCK_END = '# <<< llmcode managed block <<<'
 
-# Shared MCP catalogue (single source of truth for OpenCode and Codex); all disabled by default.
-DEFAULT_MCP_SERVERS: Dict[str, List[str]] = {
-    'fetch': ['uvx', 'mcp-server-fetch'],
-    'context7': ['npx', '-y', '@upstash/context7-mcp'],
-    'sequential-thinking': ['npx', '-y', '@modelcontextprotocol/server-sequential-thinking'],
-    'playwright': ['npx', '-y', '@playwright/mcp@latest'],
+# Shared MCP catalogue with 2-tier categorization (Tier 1: Zero-config local; Tier 2: Cloud / API-key)
+DEFAULT_MCP_CATALOG: Dict[str, Dict[str, Any]] = {
+    # Tier 1: Zero-config local utilities (uvx / npx)
+    'fetch': {
+        'command': 'uvx',
+        'args': ['mcp-server-fetch'],
+        'tier': 1,
+        'description': 'Web fetch and HTML-to-Markdown conversion',
+    },
+    'context7': {
+        'command': 'npx',
+        'args': ['-y', '@upstash/context7-mcp'],
+        'tier': 1,
+        'description': 'Live library documentation and API reference search',
+    },
+    'sequential-thinking': {
+        'command': 'npx',
+        'args': ['-y', '@modelcontextprotocol/server-sequential-thinking'],
+        'tier': 1,
+        'description': 'Dynamic step-by-step reasoning and hypothesis branching',
+    },
+    'playwright': {
+        'command': 'npx',
+        'args': ['-y', '@playwright/mcp@latest'],
+        'tier': 1,
+        'description': 'Browser automation, DOM interaction, and screenshots',
+    },
+    'git': {
+        'command': 'uvx',
+        'args': ['mcp-server-git'],
+        'tier': 1,
+        'description': 'Git repository diffs, log inspection, and history',
+    },
+    'memory': {
+        'command': 'npx',
+        'args': ['-y', '@modelcontextprotocol/server-memory'],
+        'tier': 1,
+        'description': 'Persistent graph-based agent memory across sessions',
+    },
+    'filesystem': {
+        'command': 'npx',
+        'args': ['-y', '@modelcontextprotocol/server-filesystem'],
+        'tier': 1,
+        'description': 'Explicit local filesystem directory exploration',
+    },
+    'sqlite': {
+        'command': 'uvx',
+        'args': ['mcp-server-sqlite'],
+        'tier': 1,
+        'description': 'Local SQLite database queries and schema inspection',
+    },
+    # Tier 2: Cloud / API-key required utilities
+    'github': {
+        'command': 'npx',
+        'args': ['-y', '@modelcontextprotocol/server-github'],
+        'tier': 2,
+        'env_var': 'GITHUB_PERSONAL_ACCESS_TOKEN',
+        'description': 'GitHub API for repos, pull requests, issues, and search',
+    },
+    'brave-search': {
+        'command': 'npx',
+        'args': ['-y', '@modelcontextprotocol/server-brave-search'],
+        'tier': 2,
+        'env_var': 'BRAVE_API_KEY',
+        'description': 'Brave web and news search engine',
+    },
+    'tavily': {
+        'command': 'npx',
+        'args': ['-y', 'tavily-mcp'],
+        'tier': 2,
+        'env_var': 'TAVILY_API_KEY',
+        'description': 'Tavily AI-optimized research and search engine',
+    },
+    'firecrawl': {
+        'command': 'npx',
+        'args': ['-y', 'firecrawl-mcp'],
+        'tier': 2,
+        'env_var': 'FIRECRAWL_API_KEY',
+        'description': 'Firecrawl deep web crawling and markdown extraction',
+    },
 }
+
+# Backward-compatible command-args mapping
+DEFAULT_MCP_SERVERS: Dict[str, List[str]] = {
+    name: [spec['command']] + list(spec['args']) for name, spec in DEFAULT_MCP_CATALOG.items()
+}
+
+
+def get_configured_mcp_servers() -> Dict[str, Dict[str, Any]]:
+    """Returns actively enabled MCP servers from config/config.json, adhering to strict opt-in."""
+    try:
+        from src.common.paths import load_config
+        cfg = load_config()
+        mcp_data = cfg.get('mcp', {})
+        enabled = mcp_data.get('enabled_servers', [])
+        servers = mcp_data.get('servers', {})
+        if not enabled:
+            return {}
+        return {k: v for k, v in servers.items() if k in enabled}
+    except Exception:
+        return {}
 
 
 def backup(path: Path) -> Optional[Path]:
@@ -38,8 +132,11 @@ def backup(path: Path) -> Optional[Path]:
 
 
 def _strip_block(text: str) -> str:
+    if BLOCK_BEGIN not in text:
+        return text
     pattern = re.compile(rf'\n?{re.escape(BLOCK_BEGIN)}.*?{re.escape(BLOCK_END)}\n?', re.S)
-    return pattern.sub('\n', text).rstrip('\n')
+    stripped = pattern.sub('\n', text).strip()
+    return (stripped + '\n') if stripped else ''
 
 
 def _toml_str(value: str) -> str:
@@ -67,11 +164,13 @@ def write_claude_settings(home: Path, base_url: str, alias: str, context: int = 
       - defaultMode: "bypassPermissions"
       - permissions: {"defaultMode": "bypassPermissions"}
     Sets model to alias (e.g. llamacpp) and configures env (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, etc.).
-    Preserves other user-defined settings and creates timestamped backup.
+    Preserves other user-defined settings, creates timestamped backup, and writes
+    dedicated `<home>/.claude/llmcode.settings.json` for `--settings` local launches.
     """
     claude_dir = home / '.claude'
     claude_dir.mkdir(parents=True, exist_ok=True)
     settings_file = claude_dir / 'settings.json'
+    llmcode_settings_file = claude_dir / 'llmcode.settings.json'
 
     data: Dict[str, Any] = {}
     original = ''
@@ -111,15 +210,163 @@ def write_claude_settings(home: Path, base_url: str, alias: str, context: int = 
         if original:
             backup(settings_file)
         settings_file.write_text(new_text, encoding='utf-8')
+
+    # Write dedicated llmcode.settings.json for `claude --settings`
+    local_payload = {
+        'defaultMode': 'bypassPermissions',
+        'permissions': {'defaultMode': 'bypassPermissions'},
+        'model': alias,
+        'env': {
+            'ANTHROPIC_BASE_URL': base_url,
+            'ANTHROPIC_MODEL': alias,
+            'ANTHROPIC_SMALL_FAST_MODEL': alias,
+            'ANTHROPIC_DEFAULT_OPUS_MODEL': alias,
+            'ANTHROPIC_DEFAULT_SONNET_MODEL': alias,
+            'ANTHROPIC_DEFAULT_HAIKU_MODEL': alias,
+            'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
+            'DISABLE_TELEMETRY': '1',
+            'API_TIMEOUT_MS': '600000',
+        },
+    }
+    llmcode_settings_file.write_text(json.dumps(local_payload, indent=2) + '\n', encoding='utf-8')
     return settings_file
 
 
-def write_codex_default_config(home: Path, base_url: str, alias: str, context: int = 0) -> Path:
+def write_claude_mcp_config(home: Path, mcp_servers: Optional[Dict[str, Dict[str, Any]]] = None) -> Path:
     """
-    Writes or updates managed block in `<home>/.codex/config.toml`.
-    Sets default model to alias (e.g. llamacpp), provider to llmcode,
-    approval_policy = 'never', and registers the [model_providers.llmcode] section.
-    Preserves user configuration outside the managed block.
+    Writes or updates user-scope MCP servers in `<home>/.claude.json`.
+    Strict opt-in: only actively selected MCP servers are written.
+    """
+    claude_json = home / '.claude.json'
+    data: Dict[str, Any] = {}
+    original = ''
+    if claude_json.is_file():
+        original = claude_json.read_text(encoding='utf-8')
+        try:
+            parsed = json.loads(original)
+            if isinstance(parsed, dict):
+                data = parsed
+        except Exception:
+            pass
+
+    selected = mcp_servers if mcp_servers is not None else get_configured_mcp_servers()
+    mcp_map = data.setdefault('mcpServers', {})
+
+    for name, spec in selected.items():
+        cmd = spec.get('command') or ''
+        args = spec.get('args') or []
+        env = spec.get('env') or {}
+        entry: Dict[str, Any] = {
+            'command': cmd,
+            'args': list(args),
+        }
+        if env:
+            entry['env'] = env
+        mcp_map[name] = entry
+
+    for name in DEFAULT_MCP_CATALOG:
+        if name not in selected and name in mcp_map:
+            mcp_map.pop(name, None)
+
+    new_text = json.dumps(data, indent=2) + '\n'
+    if new_text != original:
+        if original:
+            backup(claude_json)
+        claude_json.write_text(new_text, encoding='utf-8')
+    return claude_json
+
+
+def write_codex_profile(
+    home: Path,
+    base_url: str,
+    alias: str,
+    context: int = 0,
+    mcp_servers: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Path:
+    """
+    Writes dedicated profile `<home>/.codex/llmcode.config.toml`.
+    Codex v0.167+ overlays `<home>/.codex/<profile>.config.toml` on top of `config.toml`.
+    Adheres to strict opt-in and checks base config.toml to avoid duplicate MCP table declarations.
+    """
+    codex_dir = home / '.codex'
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    cleanup_legacy_codex_config(home)
+
+    base_cfg = codex_dir / 'config.toml'
+    existing_base_mcps = set()
+    if base_cfg.is_file():
+        try:
+            base_parsed = tomllib.loads(base_cfg.read_text(encoding='utf-8'))
+            existing_base_mcps = set(base_parsed.get('mcp_servers', {}).keys())
+        except Exception:
+            pass
+
+    cfg = codex_dir / f'{CODEX_PROFILE}.config.toml'
+    original = cfg.read_text(encoding='utf-8') if cfg.is_file() else ''
+
+    lines = [
+        BLOCK_BEGIN,
+        f'model = {_toml_str(alias)}',
+        f'model_provider = {_toml_str(CODEX_PROFILE)}',
+        'approval_policy = "never"',
+    ]
+    if context > 0:
+        lines.append(f'model_context_window = {int(context)}')
+
+    lines += [
+        '',
+        f'[model_providers.{CODEX_PROFILE}]',
+        f'name = {_toml_str("llmCode local (" + alias + ")")}',
+        f'base_url = {_toml_str(base_url.rstrip("/") + "/v1")}',
+        f'env_key = {_toml_str(CODEX_KEY_ENV)}',
+        'wire_api = "responses"',
+        'stream_idle_timeout_ms = 600000',
+    ]
+
+    selected = mcp_servers if mcp_servers is not None else get_configured_mcp_servers()
+    if selected:
+        for name, spec in selected.items():
+            if name in existing_base_mcps:
+                continue
+            cmd = spec.get('command') or ''
+            args = spec.get('args') or []
+            env = spec.get('env') or {}
+            lines += ['', f'[mcp_servers.{_toml_str(name)}]', f'command = {_toml_str(cmd)}',
+                      f'args = [{", ".join(_toml_str(a) for a in args)}]']
+            if env:
+                env_pairs = ', '.join(f'{_toml_str(k)} = {_toml_str(v)}' for k, v in env.items())
+                lines.append(f'env = {{{env_pairs}}}')
+            lines.append('enabled = true')
+    else:
+        for name, argv in DEFAULT_MCP_SERVERS.items():
+            if name in existing_base_mcps:
+                continue
+            lines += ['', f'[mcp_servers.{_toml_str(name)}]', f'command = {_toml_str(argv[0])}',
+                      f'args = [{", ".join(_toml_str(a) for a in argv[1:])}]', 'enabled = false']
+
+    lines.append(BLOCK_END)
+
+    new_text = '\n'.join(lines) + '\n'
+    tomllib.loads(new_text)  # Fail before writing if invalid TOML
+
+    if new_text != original:
+        if original:
+            backup(cfg)
+        cfg.write_text(new_text, encoding='utf-8')
+    return cfg
+
+
+def write_codex_default_config(
+    home: Path,
+    base_url: str,
+    alias: str,
+    context: int = 0,
+    mcp_servers: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Path:
+    """
+    Writes or updates managed block in `<home>/.codex/config.toml` safely and synchronizes profile.
+    Sets default model to alias (e.g. llamacpp), provider to llmcode, approval_policy = 'never',
+    and registers the [model_providers.llmcode] section without duplicate MCP table collisions.
     """
     codex_dir = home / '.codex'
     codex_dir.mkdir(parents=True, exist_ok=True)
@@ -145,10 +392,6 @@ def write_codex_default_config(home: Path, base_url: str, alias: str, context: i
         'wire_api = "responses"',
         'stream_idle_timeout_ms = 600000',
     ]
-
-    for name, argv in DEFAULT_MCP_SERVERS.items():
-        block_lines += ['', f'[mcp_servers.{_toml_str(name)}]', f'command = {_toml_str(argv[0])}',
-                        f'args = [{", ".join(_toml_str(a) for a in argv[1:])}]', 'enabled = false']
     block_lines.append(BLOCK_END)
     block_text = '\n'.join(block_lines)
 
@@ -159,52 +402,8 @@ def write_codex_default_config(home: Path, base_url: str, alias: str, context: i
         if original:
             backup(cfg)
         cfg.write_text(new_text, encoding='utf-8')
-    return cfg
 
-
-def write_codex_profile(home: Path, base_url: str, alias: str, context: int = 0) -> Path:
-    """
-    Writes dedicated profile `<home>/.codex/llmcode.config.toml`.
-    Codex v0.167+ overlays `<home>/.codex/<profile>.config.toml` on top of `config.toml`.
-    """
-    codex_dir = home / '.codex'
-    codex_dir.mkdir(parents=True, exist_ok=True)
-    cleanup_legacy_codex_config(home)
-
-    cfg = codex_dir / f'{CODEX_PROFILE}.config.toml'
-    original = cfg.read_text(encoding='utf-8') if cfg.is_file() else ''
-
-    lines = [
-        BLOCK_BEGIN,
-        f'model = {_toml_str(alias)}',
-        f'model_provider = {_toml_str(CODEX_PROFILE)}',
-        'approval_policy = "never"',
-    ]
-    if context > 0:
-        lines.append(f'model_context_window = {int(context)}')
-
-    lines += [
-        '',
-        f'[model_providers.{CODEX_PROFILE}]',
-        f'name = {_toml_str("llmCode local (" + alias + ")")}',
-        f'base_url = {_toml_str(base_url.rstrip("/") + "/v1")}',
-        f'env_key = {_toml_str(CODEX_KEY_ENV)}',
-        'wire_api = "responses"',
-        'stream_idle_timeout_ms = 600000',
-    ]
-
-    for name, argv in DEFAULT_MCP_SERVERS.items():
-        lines += ['', f'[mcp_servers.{_toml_str(name)}]', f'command = {_toml_str(argv[0])}',
-                  f'args = [{", ".join(_toml_str(a) for a in argv[1:])}]', 'enabled = false']
-    lines.append(BLOCK_END)
-
-    new_text = '\n'.join(lines) + '\n'
-    tomllib.loads(new_text)  # Fail before writing if invalid TOML
-
-    if new_text != original:
-        if original:
-            backup(cfg)
-        cfg.write_text(new_text, encoding='utf-8')
+    write_codex_profile(home, base_url, alias, context=context, mcp_servers=mcp_servers)
     return cfg
 
 
@@ -223,6 +422,7 @@ def setup_all_agent_configs(home: Optional[Path] = None, port: int = 8080, non_i
 
     results: Dict[str, Path] = {}
     results['claude'] = write_claude_settings(user_home, base_url, alias, context=context)
+    results['claude_mcp'] = write_claude_mcp_config(user_home)
     results['codex_profile'] = write_codex_profile(user_home, base_url, alias, context=context)
     results['codex_config'] = write_codex_default_config(user_home, base_url, alias, context=context)
     return results

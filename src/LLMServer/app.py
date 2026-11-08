@@ -49,7 +49,14 @@ from src.common.harness import (
     context_warning,
     CODEX_PROFILE,
 )
-from src.common.harness_config import write_codex_profile, DEFAULT_MCP_SERVERS
+from src.common.harness_config import (
+    write_codex_profile,
+    write_claude_settings,
+    write_claude_mcp_config,
+    get_configured_mcp_servers,
+    DEFAULT_MCP_CATALOG,
+    DEFAULT_MCP_SERVERS,
+)
 from src.common.endpoint import resolve_base_url, stop_litellm_proxy, proxy_status
 
 # Auto-verify and sync paths in config/config.json on server startup
@@ -1403,11 +1410,11 @@ def write_opencode_config(
     port: int,
     rag_context_file: Optional[Path] = None,
     context_limit: Optional[int] = None,
+    mcp_servers: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Path:
     """
     Writes or updates the global OpenCode configuration (~/.config/opencode/opencode.jsonc)
-    so OpenCode CLI connects directly to the local backend API from any directory without
-    polluting project repositories with per-project opencode.json files.
+    using the official OpenCode v2 schema (providers, permissions array, mcp.servers map).
     """
     cfg_path = GLOBAL_OPENCODE_CONFIG
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1418,7 +1425,12 @@ def write_opencode_config(
         except Exception:
             data = {}
     data.setdefault('$schema', 'https://opencode.ai/config.json')
-    providers = data.setdefault('provider', {})
+
+    # Prune legacy v1 keys
+    data.pop('provider', None)
+    data.pop('permission', None)
+
+    providers = data.setdefault('providers', {})
 
     # Resolve active context limit
     ctx = context_limit
@@ -1448,9 +1460,15 @@ def write_opencode_config(
         },
     }
 
-    providers['llmcode'] = {
+    provider_entry = {
+        'package': 'aisdk:@ai-sdk/openai-compatible',
         'npm': '@ai-sdk/openai-compatible',
         'name': f'llmCode ({alias})',
+        'settings': {
+            'baseURL': f'http://127.0.0.1:{port}/v1',
+            'apiKey': f'{{file:{API_KEY_FILE.as_posix()}}}',
+            'timeout': 600000,
+        },
         'options': {
             'baseURL': f'http://127.0.0.1:{port}/v1',
             'apiKey': f'{{file:{API_KEY_FILE.as_posix()}}}',
@@ -1460,8 +1478,17 @@ def write_opencode_config(
             alias: model_entry,
         },
     }
+
+    providers = data.setdefault('providers', {})
+    providers['llmcode'] = provider_entry
+    data['provider'] = providers
+
     data['model'] = f'llmcode/{alias}'
     data['default_agent'] = 'build'
+    data['permissions'] = [
+        {'action': p, 'resource': '*', 'effect': 'allow'}
+        for p in ('read', 'edit', 'glob', 'grep', 'list', 'shell', 'subagent', 'todowrite', 'question')
+    ]
     data['permission'] = {
         'read': 'allow',
         'edit': 'allow',
@@ -1471,8 +1498,9 @@ def write_opencode_config(
         'bash': 'allow',
         'task': 'allow',
         'todowrite': 'allow',
-        'question': 'allow'
+        'question': 'allow',
     }
+
     instr_list = []
     global_instr = HOME / '.config' / 'opencode' / 'instructions.md'
     if global_instr.is_file():
@@ -1482,15 +1510,37 @@ def write_opencode_config(
     if instr_list:
         data['instructions'] = instr_list
 
-    # Ensure standard MCP servers for coding, research, and automation are pre-configured (disabled by default)
-    mcp_servers = data.setdefault('mcp', {})
-    for mcp_name, cmd_args in DEFAULT_MCP_SERVERS.items():
-        if mcp_name not in mcp_servers:
-            mcp_servers[mcp_name] = {
+    # Modern OpenCode v2 mcp.servers map adhering to strict opt-in while supporting backward compatibility
+    mcp_root = data.setdefault('mcp', {})
+    servers_map = mcp_root.setdefault('servers', {})
+    servers_map.clear()
+
+    selected = mcp_servers if mcp_servers is not None else get_configured_mcp_servers()
+    if selected:
+        for name, spec in selected.items():
+            cmd = spec.get('command') or ''
+            args = spec.get('args') or []
+            env = spec.get('env') or {}
+            entry: Dict[str, Any] = {
+                'type': 'local',
+                'command': [cmd] + list(args),
+                'enabled': True,
+                'disabled': False,
+            }
+            if env:
+                entry['environment'] = env
+            servers_map[name] = entry
+            mcp_root[name] = entry
+    else:
+        for mcp_name, cmd_args in DEFAULT_MCP_SERVERS.items():
+            entry = {
                 'type': 'local',
                 'enabled': False,
+                'disabled': True,
                 'command': cmd_args,
             }
+            servers_map[mcp_name] = entry
+            mcp_root[mcp_name] = entry
 
     cfg_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
 
@@ -1594,6 +1644,8 @@ def launch_harness_by_id(harness_id: str, params: HarnessLaunch) -> Dict[str, An
             raise HTTPException(400, 'Claude Code binary not found in venv or PATH. Run setup first.')
         base_url, ep_mode = resolve_base_url('anthropic', PORT, params.alias, curr_api_key)
         warning_msg = context_warning('claude', params.context)
+        write_claude_settings(HOME, base_url, params.alias, context=params.context)
+        write_claude_mcp_config(HOME)
         cmd = build_launch_command(
             'claude',
             claude_bin,
@@ -1602,6 +1654,7 @@ def launch_harness_by_id(harness_id: str, params: HarnessLaunch) -> Dict[str, An
             restore=params.restore_history,
             session_id=params.session_id,
             key_file=API_KEY_FILE,
+            settings_file=HOME / '.claude' / 'llmcode.settings.json',
         )
         h_proc = spawn_in_terminal(cmd, cwd=project, title="Claude Code CLI")
 

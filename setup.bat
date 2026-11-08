@@ -12,6 +12,7 @@ cd /d "%SCRIPT_DIR%"
 
 REM Check for --uninstall before touching .venv (avoids Windows file lock on .venv\Scripts\python.exe)
 set "IS_FULL=0"
+set "NON_INTERACTIVE=0"
 set "PASSTHROUGH_ARGS="
 for %%A in (%*) do (
     if /i "%%~A"=="--uninstall" (
@@ -19,6 +20,15 @@ for %%A in (%*) do (
         exit /b 0
     ) else if /i "%%~A"=="--full" (
         set "IS_FULL=1"
+    ) else if /i "%%~A"=="-y" (
+        set "NON_INTERACTIVE=1"
+        set "PASSTHROUGH_ARGS=!PASSTHROUGH_ARGS! %%~A"
+    ) else if /i "%%~A"=="--yes" (
+        set "NON_INTERACTIVE=1"
+        set "PASSTHROUGH_ARGS=!PASSTHROUGH_ARGS! %%~A"
+    ) else if /i "%%~A"=="--non-interactive" (
+        set "NON_INTERACTIVE=1"
+        set "PASSTHROUGH_ARGS=!PASSTHROUGH_ARGS! %%~A"
     ) else (
         set "PASSTHROUGH_ARGS=!PASSTHROUGH_ARGS! %%~A"
     )
@@ -44,11 +54,16 @@ if exist "%SCRIPT_DIR%.git" (
             echo ==========================================================
             echo  New updates detected from git remote repository!
             echo ==========================================================
-            set /p "PULL_ANS=Run 'git pull' now before continuing setup? [Y/n]: "
-            if not defined PULL_ANS set "PULL_ANS=y"
-            if /i "!PULL_ANS!"=="y" (
-                echo Pulling latest changes...
-                git -C "%SCRIPT_DIR%" pull --ff-only
+            if "!NON_INTERACTIVE!"=="1" (
+                echo Non-interactive run detected: pulling latest changes...
+                git -C "%SCRIPT_DIR%" pull --ff-only || echo Warning: git pull failed. Continuing...
+            ) else (
+                set /p "PULL_ANS=Run 'git pull' now before continuing setup? [Y/n]: "
+                if not defined PULL_ANS set "PULL_ANS=y"
+                if /i "!PULL_ANS!"=="y" (
+                    echo Pulling latest changes...
+                    git -C "%SCRIPT_DIR%" pull --ff-only || echo Warning: git pull failed. Continuing...
+                )
             )
         )
     )
@@ -69,6 +84,14 @@ if not defined BASE_PY (
     ) else (
         echo Manual guidance: Install Python 3.12 from https://www.python.org/downloads/ and check "Add Python to PATH".
         exit /b 1
+    )
+)
+
+if exist "%VENV_PY%" (
+    "%VENV_PY%" -c "import sys; sys.exit(0)" >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo Rebuilding relocated or corrupted virtual environment at %VENV_DIR%...
+        rmdir /s /q "%VENV_DIR%"
     )
 )
 

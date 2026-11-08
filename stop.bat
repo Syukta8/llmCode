@@ -18,5 +18,6 @@ if exist "%VENV_PY%" (
 
 taskkill /F /IM llama-server.exe >nul 2>&1
 taskkill /F /IM koboldcpp.exe >nul 2>&1
+taskkill /F /IM litellm.exe >nul 2>&1
 if exist "%SCRIPT_DIR%config\llmserver.pid" del /f /q "%SCRIPT_DIR%config\llmserver.pid" >nul 2>&1
 echo All llmCode services stopped.

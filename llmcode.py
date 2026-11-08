@@ -545,6 +545,7 @@ def cmd_harness(args):
     from src.common.harness import HARNESSES, build_launch_command, context_warning
     from src.common.harness_config import (
         write_claude_settings,
+        write_claude_mcp_config,
         write_codex_default_config,
         write_codex_profile,
     )
@@ -568,7 +569,16 @@ def cmd_harness(args):
         if warn:
             print(f"Warning: {warn}")
         write_claude_settings(Path.home(), base_url, alias, context=context)
-        cmd = build_launch_command('claude', agent_bin, alias, base_url, restore=restore, session_id=session_id)
+        write_claude_mcp_config(Path.home())
+        cmd = build_launch_command(
+            'claude',
+            agent_bin,
+            alias,
+            base_url,
+            restore=restore,
+            session_id=session_id,
+            settings_file=Path.home() / '.claude' / 'llmcode.settings.json',
+        )
 
     elif harness_id == 'codex':
         base_url, _ = resolve_base_url('responses', port, alias, api_key)
