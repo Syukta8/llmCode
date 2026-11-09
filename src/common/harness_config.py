@@ -60,7 +60,7 @@ DEFAULT_MCP_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     'filesystem': {
         'command': 'npx',
-        'args': ['-y', '@modelcontextprotocol/server-filesystem'],
+        'args': ['-y', '@modelcontextprotocol/server-filesystem', str(Path.home())],
         'tier': 1,
         'description': 'Explicit local filesystem directory exploration',
     },
@@ -105,6 +105,16 @@ DEFAULT_MCP_CATALOG: Dict[str, Dict[str, Any]] = {
 DEFAULT_MCP_SERVERS: Dict[str, List[str]] = {
     name: [spec['command']] + list(spec['args']) for name, spec in DEFAULT_MCP_CATALOG.items()
 }
+
+# Recommended default local servers for zero-config workflows
+RECOMMENDED_MCP_SERVERS: List[str] = [
+    'fetch',
+    'sequential-thinking',
+    'context7',
+    'memory',
+    'playwright',
+    'filesystem',
+]
 
 
 def get_configured_mcp_servers() -> Dict[str, Dict[str, Any]]:
@@ -257,11 +267,11 @@ def write_claude_mcp_config(home: Path, mcp_servers: Optional[Dict[str, Dict[str
         args = spec.get('args') or []
         env = spec.get('env') or {}
         entry: Dict[str, Any] = {
+            'type': spec.get('type') or 'stdio',
             'command': cmd,
             'args': list(args),
+            'env': env,
         }
-        if env:
-            entry['env'] = env
         mcp_map[name] = entry
 
     for name in DEFAULT_MCP_CATALOG:

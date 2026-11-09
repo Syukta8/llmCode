@@ -1625,6 +1625,15 @@ def setup_mcp_servers(non_interactive: bool = False) -> Dict[str, Any]:
         saved_servers = mcp_data.get('servers', {})
         if enabled:
             selected_servers = {k: v for k, v in saved_servers.items() if k in enabled}
+        else:
+            from src.common.harness_config import RECOMMENDED_MCP_SERVERS
+            for k in RECOMMENDED_MCP_SERVERS:
+                if k in DEFAULT_MCP_CATALOG:
+                    spec = DEFAULT_MCP_CATALOG[k]
+                    selected_servers[k] = {
+                        'command': spec['command'],
+                        'args': list(spec['args']),
+                    }
     else:
         print("[Tier 1] Zero-Config Coding & Research Servers (No API keys needed):")
         for i, k in enumerate(tier1_keys, 1):
@@ -1746,9 +1755,6 @@ def install_cli_agents(venv_python: str, non_interactive: bool = False):
         _ensure_litellm_proxy(venv_python)
         for name in NPM_HARNESS_PACKAGES:
             _install_npm_harness(venv_dir, name, non_interactive=non_interactive)
-
-    if choice in ('1', '2', '3'):
-        setup_mcp_servers(non_interactive=non_interactive)
 
 
 def setup_opencode_orchestrator():
@@ -2055,6 +2061,9 @@ def main(non_interactive: bool = False, uninstall: bool = False):
     venv_py = REPO_ROOT / 'src' / 'LLMServer' / '.venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python3')
     py_exe = str(venv_py) if venv_py.is_file() else sys.executable
     install_cli_agents(py_exe, non_interactive=non_interactive)
+
+    # 5.5. Configure Model Context Protocol (MCP) servers across OpenCode, Claude Code, and Codex
+    setup_mcp_servers(non_interactive=non_interactive)
 
     # 6. Offer to configure VS Code Continue if ~/.continue/config.yaml or config.json exists
     setup_continue_config(non_interactive=non_interactive)
