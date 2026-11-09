@@ -118,16 +118,24 @@ RECOMMENDED_MCP_SERVERS: List[str] = [
 
 
 def get_configured_mcp_servers() -> Dict[str, Dict[str, Any]]:
-    """Returns actively enabled MCP servers from config/config.json, adhering to strict opt-in."""
+    """Returns actively enabled MCP servers from config/config.json, adhering to strict opt-in with fallback."""
     try:
         from src.common.paths import load_config
         cfg = load_config()
         mcp_data = cfg.get('mcp', {})
         enabled = mcp_data.get('enabled_servers', [])
         servers = mcp_data.get('servers', {})
-        if not enabled:
-            return {}
-        return {k: v for k, v in servers.items() if k in enabled}
+        if enabled:
+            return {k: v for k, v in servers.items() if k in enabled}
+        res: Dict[str, Dict[str, Any]] = {}
+        for k in RECOMMENDED_MCP_SERVERS:
+            if k in DEFAULT_MCP_CATALOG:
+                spec = DEFAULT_MCP_CATALOG[k]
+                res[k] = {
+                    'command': spec['command'],
+                    'args': list(spec['args']),
+                }
+        return res
     except Exception:
         return {}
 

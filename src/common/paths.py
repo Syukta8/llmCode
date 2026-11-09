@@ -434,6 +434,9 @@ def load_config() -> Dict[str, Any]:
                     for section in ('paths', 'binaries', 'agents', 'settings', 'downloads'):
                         if isinstance(raw.get(section), dict):
                             base[section].update(raw[section])
+                    for k, v in raw.items():
+                        if k not in base:
+                            base[k] = v
                     return base
             except Exception:
                 pass

@@ -1512,6 +1512,11 @@ def write_opencode_config(
 
     # Modern OpenCode v2 mcp.servers map adhering to strict opt-in while supporting backward compatibility
     mcp_root = data.setdefault('mcp', {})
+    # Strip deprecated root-level MCP server keys to avoid duplicate declarations
+    for k in list(mcp_root.keys()):
+        if k not in ('servers', 'timeout'):
+            mcp_root.pop(k, None)
+
     servers_map = mcp_root.setdefault('servers', {})
     servers_map.clear()
 
@@ -1530,7 +1535,6 @@ def write_opencode_config(
             if env:
                 entry['environment'] = env
             servers_map[name] = entry
-            mcp_root[name] = entry
     else:
         for mcp_name, cmd_args in DEFAULT_MCP_SERVERS.items():
             entry = {
@@ -1540,7 +1544,6 @@ def write_opencode_config(
                 'command': cmd_args,
             }
             servers_map[mcp_name] = entry
-            mcp_root[mcp_name] = entry
 
     cfg_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
 
