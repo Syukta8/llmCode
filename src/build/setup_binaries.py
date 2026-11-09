@@ -2,7 +2,7 @@
 """
 Interactive cross-platform installer, hardware & package scanner (`config/hardware.json`),
 prerequisite verifier, source compiler for backend engines (llama.cpp, koboldcpp, ollama),
-venv-scoped CLI coding agent installer (opencode, claude, codex), VS Code Continue configurator,
+venv-scoped CLI coding agent installer (opencode, claude, codex),
 and full uninstaller (`--uninstall`) across Windows, Linux, and macOS.
 """
 import json
@@ -476,20 +476,33 @@ def scan_and_save_hardware() -> Dict[str, Any]:
 
     # Auto-tune build flags for llama.cpp, koboldcpp, and ollama
     parallel_jobs = max(2, min(16, cpu_cores - 1 if cpu_cores > 2 else 2))
-    llama_cmake_flags = ['-DCMAKE_BUILD_TYPE=Release']
+    llama_cmake_flags = [
+        '-DCMAKE_BUILD_TYPE=Release',
+        '-DGGML_NATIVE=ON',
+        '-DCMAKE_C_FLAGS=-O3 -march=native -mtune=native',
+        '-DCMAKE_CXX_FLAGS=-O3 -march=native -mtune=native',
+    ]
     if gpu['acceleration'] == 'cuda' and nvcc_path:
         llama_cmake_flags.extend([
             '-DGGML_CUDA=ON',
             f'-DCMAKE_CUDA_COMPILER={nvcc_path}',
-            '-DGGML_CUDA_FORCE_MMQ=ON',
             '-DGGML_CUDA_FA_ALL_QUANTS=ON',
+            '-DCMAKE_CUDA_FLAGS=-O3 -use_fast_math',
         ])
+        cc_str = gpu.get('compute_capability', '')
+        try:
+            cc_float = float(cc_str)
+        except (ValueError, TypeError):
+            cc_float = 0.0
+        # Pascal / GTX 1000 (< 7.0) lacks Tensor Cores: force MMQ with DP4A integer instructions
+        if 0 < cc_float < 7.0:
+            llama_cmake_flags.append('-DGGML_CUDA_FORCE_MMQ=ON')
+        # Turing / Ampere / Ada / Blackwell (>= 7.0): omit FORCE_MMQ so cuBLAS utilizes native Tensor Cores
+
         if gpu.get('cuda_arch'):
             llama_cmake_flags.append(f"-DCMAKE_CUDA_ARCHITECTURES={gpu['cuda_arch']}")
     elif gpu['acceleration'] == 'metal':
         llama_cmake_flags.append('-DGGML_METAL=ON')
-    else:
-        llama_cmake_flags.append('-DGGML_NATIVE=ON')
 
     kobold_make_flags = ['LLAMA_PORTABLE=1']
     if gpu['acceleration'] == 'cuda' and nvcc_path:
@@ -1771,106 +1784,7 @@ def setup_opencode_orchestrator():
         pass
 
 
-# ==============================================================================
-# VS Code Continue Configurator (Standard Aliases: llamacpp, koboldcpp, ollama)
-# ==============================================================================
-def setup_continue_config(continue_dir: Optional[Path] = None, port: int = 8080, non_interactive: bool = False) -> Optional[Path]:
-    """
-    Checks if VS Code Continue configuration (`~/.continue/config.yaml` or `~/.continue/config.json`)
-    exists. If found, offers to configure standard backend aliases (`llamacpp`, `koboldcpp`, `ollama`)
-    pointing to `http://127.0.0.1:<port>/v1`.
-    """
-    c_dir = continue_dir or (Path.home() / '.continue')
-    yaml_path = c_dir / 'config.yaml'
-    json_path = c_dir / 'config.json'
 
-    target_file = yaml_path if yaml_path.is_file() else (json_path if json_path.is_file() else None)
-    if not target_file:
-        return None
-
-    print(f"\nFound VS Code Continue configuration at: {target_file}")
-    ans = _prompt_choice(
-        "Configure standard llmCode backends (llamacpp, koboldcpp, ollama) in Continue? (y/n)",
-        ['y', 'yes', 'n', 'no'],
-        default='y',
-        non_interactive=non_interactive,
-    )
-    if ans not in ('y', 'yes'):
-        return None
-
-    api_base = f"http://127.0.0.1:{port}/v1"
-
-    if target_file.suffix.lower() in ('.yaml', '.yml'):
-        content = target_file.read_text(encoding='utf-8')
-        marker_start = "# >>> llmCode standard backends >>>"
-        marker_end = "# <<< llmCode standard backends <<<"
-        block = (
-            f"{marker_start}\n"
-            f"  - name: llamacpp\n"
-            f"    provider: openai\n"
-            f"    model: llamacpp\n"
-            f"    apiBase: {api_base}\n"
-            f"    apiKey: <PASTE_API_KEY_FROM_DASHBOARD>\n"
-            f"    roles:\n"
-            f"      - chat\n"
-            f"      - edit\n"
-            f"      - apply\n"
-            f"  - name: koboldcpp\n"
-            f"    provider: openai\n"
-            f"    model: koboldcpp\n"
-            f"    apiBase: {api_base}\n"
-            f"    apiKey: <PASTE_API_KEY_FROM_DASHBOARD>\n"
-            f"    roles:\n"
-            f"      - chat\n"
-            f"      - edit\n"
-            f"      - apply\n"
-            f"  - name: ollama\n"
-            f"    provider: openai\n"
-            f"    model: ollama\n"
-            f"    apiBase: {api_base}\n"
-            f"    apiKey: <PASTE_API_KEY_FROM_DASHBOARD>\n"
-            f"    roles:\n"
-            f"      - chat\n"
-            f"      - edit\n"
-            f"      - apply\n"
-            f"{marker_end}"
-        )
-        if marker_start in content and marker_end in content:
-            pattern = re.compile(re.escape(marker_start) + r".*?" + re.escape(marker_end), re.DOTALL)
-            new_content = pattern.sub(block, content)
-        elif 'models:' in content:
-            new_content = content.replace('models:', f"models:\n{block}", 1)
-        else:
-            new_content = content.rstrip() + f"\n\nmodels:\n{block}\n"
-        target_file.write_text(new_content, encoding='utf-8')
-        print(f"Updated {target_file} with standard aliases: llamacpp, koboldcpp, ollama")
-        return target_file
-
-    elif target_file.suffix.lower() == '.json':
-        try:
-            data = json.loads(target_file.read_text(encoding='utf-8'))
-        except Exception:
-            data = {}
-        models = data.get('models', [])
-        if not isinstance(models, list):
-            models = []
-        # Remove old llmCode standard entries before re-inserting
-        models = [m for m in models if m.get('title') not in ('llamacpp', 'koboldcpp', 'ollama') and m.get('model') not in ('llamacpp', 'koboldcpp', 'ollama')]
-        for alias in ('llamacpp', 'koboldcpp', 'ollama'):
-            models.append({
-                'title': alias,
-                'provider': 'openai',
-                'model': alias,
-                'apiBase': api_base,
-                'apiKey': '<PASTE_API_KEY_FROM_DASHBOARD>',
-            })
-        data['models'] = models
-        target_file.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-        print(f"Updated {target_file} with standard aliases: llamacpp, koboldcpp, ollama")
-        print("Notice: Each backend deployment generates a fresh API key. Copy it from the dashboard status bar and paste it into Continue.")
-        return target_file
-
-    return None
 
 
 def setup_agent_configs(home: Optional[Path] = None, port: int = 8080, non_interactive: bool = False) -> Dict[str, Path]:
@@ -2064,9 +1978,6 @@ def main(non_interactive: bool = False, uninstall: bool = False):
 
     # 5.5. Configure Model Context Protocol (MCP) servers across OpenCode, Claude Code, and Codex
     setup_mcp_servers(non_interactive=non_interactive)
-
-    # 6. Offer to configure VS Code Continue if ~/.continue/config.yaml or config.json exists
-    setup_continue_config(non_interactive=non_interactive)
 
     # 6.5. Deploy OpenCode orchestrator skill
     setup_opencode_orchestrator()

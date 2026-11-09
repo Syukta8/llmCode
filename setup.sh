@@ -2,7 +2,7 @@
 # ==============================================================================
 # llmCode - Unified Installer, Hardware Scanner & Uninstaller (Linux & macOS)
 # Supports:
-#   ./setup.sh              -> Full interactive setup (hardware.json, engines, venv agents, Continue)
+#   ./setup.sh              -> Full interactive setup (hardware.json, engines, venv agents)
 #   ./setup.sh --uninstall  -> Complete uninstall of venv, engines, binaries, models, configs
 # ==============================================================================
 set -euo pipefail
@@ -146,7 +146,7 @@ echo "Installing core dashboard dependencies..."
 "$VENV_PIP" install --upgrade pip setuptools wheel -q --no-warn-script-location
 "$VENV_PIP" install -q --no-warn-script-location -r "$SCRIPT_DIR/src/LLMServer/requirements.txt"
 
-# 4. Run hardware scan, engine compiler/downloader, venv CLI agents & Continue setup
+# 4. Run hardware scan, engine compiler/downloader, and venv CLI agents setup
 "$VENV_PY" "$SCRIPT_DIR/llmcode.py" setup ${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"}
 
 echo ""

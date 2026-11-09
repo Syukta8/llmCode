@@ -156,10 +156,9 @@ def _reinstall_module_agents(py_exe: str, non_interactive: bool):
 
 
 def _reinstall_module_configs(non_interactive: bool):
-    from src.build.setup_binaries import setup_agent_configs, setup_continue_config
-    print("\n[Module: configs] Configuring Claude Code, Codex, and Continue...")
+    from src.build.setup_binaries import setup_agent_configs
+    print("\n[Module: configs] Configuring Claude Code and Codex...")
     setup_agent_configs(non_interactive=non_interactive)
-    setup_continue_config(non_interactive=non_interactive)
     sync_config(apply_hardware_defaults=True)
 
 
@@ -238,7 +237,7 @@ def cmd_check_update(args):
         print("  [1] Python dependencies (requirements.txt)")
         print("  [2] Backend engines (llama.cpp, koboldcpp, ollama)")
         print("  [3] Coding agent CLIs (OpenCode, Claude, Codex in .venv)")
-        print("  [4] Agent & Editor configurations (Claude settings.json, Codex TOML, Continue)")
+        print("  [4] Agent configurations (Claude settings.json, Codex TOML)")
         sub_input = input("Enter selection [1,4]: ").strip() or "1,4"
         sub_choices = set()
         if sub_input.lower() in ('all', 'a', '*'):

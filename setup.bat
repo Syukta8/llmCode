@@ -2,7 +2,7 @@
 REM ==============================================================================
 REM llmCode - Unified Installer, Hardware Scanner & Uninstaller (Windows 10/11)
 REM Supports:
-REM   setup.bat              -> Full interactive setup (hardware.json, engines, venv agents, Continue)
+REM   setup.bat              -> Full interactive setup (hardware.json, engines, venv agents)
 REM   setup.bat --uninstall  -> Complete uninstall of venv, engines, binaries, models, configs
 REM ==============================================================================
 setlocal enabledelayedexpansion
