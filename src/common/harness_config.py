@@ -70,6 +70,24 @@ DEFAULT_MCP_CATALOG: Dict[str, Dict[str, Any]] = {
         'tier': 1,
         'description': 'Local SQLite database queries and schema inspection',
     },
+    'docx': {
+        'command': 'npx',
+        'args': ['-y', 'docx-mcp-server'],
+        'tier': 1,
+        'description': 'Microsoft Word (.docx) document reading, editing, and formatting',
+    },
+    'xlsx': {
+        'command': 'npx',
+        'args': ['-y', 'xlsx-mcp-server'],
+        'tier': 1,
+        'description': 'Microsoft Excel (.xlsx) spreadsheet reading, writing, and formulas',
+    },
+    'pptx': {
+        'command': 'uvx',
+        'args': ['pptx-mcp', 'serve'],
+        'tier': 1,
+        'description': 'PowerPoint (.pptx) presentation generation, slides, and editing',
+    },
     # Tier 2: Cloud / API-key required utilities
     'github': {
         'command': 'npx',
@@ -106,15 +124,8 @@ DEFAULT_MCP_SERVERS: Dict[str, List[str]] = {
     name: [spec['command']] + list(spec['args']) for name, spec in DEFAULT_MCP_CATALOG.items()
 }
 
-# Recommended default local servers for zero-config workflows
-RECOMMENDED_MCP_SERVERS: List[str] = [
-    'fetch',
-    'sequential-thinking',
-    'context7',
-    'memory',
-    'playwright',
-    'filesystem',
-]
+# Recommended default local servers for zero-config workflows (disabled by default; explicit opt-in)
+RECOMMENDED_MCP_SERVERS: List[str] = []
 
 
 def get_configured_mcp_servers() -> Dict[str, Dict[str, Any]]:

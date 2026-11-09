@@ -1521,29 +1521,39 @@ def write_opencode_config(
     servers_map.clear()
 
     selected = mcp_servers if mcp_servers is not None else get_configured_mcp_servers()
+    # Populate all standard catalog servers; mark active if in selected, else disabled for easy toggle
+    for mcp_name, cat_spec in DEFAULT_MCP_CATALOG.items():
+        is_active = bool(selected and mcp_name in selected)
+        active_spec = selected.get(mcp_name, {}) if is_active else {}
+        cmd = active_spec.get('command') or cat_spec.get('command') or ''
+        args = active_spec.get('args') if active_spec.get('args') is not None else cat_spec.get('args', [])
+        env = active_spec.get('env') or {}
+        entry: Dict[str, Any] = {
+            'type': 'local',
+            'command': [cmd] + list(args),
+            'enabled': is_active,
+            'disabled': not is_active,
+        }
+        if env:
+            entry['environment'] = env
+        servers_map[mcp_name] = entry
+
+    # Append any custom servers passed in selected not present in default catalog
     if selected:
         for name, spec in selected.items():
-            cmd = spec.get('command') or ''
-            args = spec.get('args') or []
-            env = spec.get('env') or {}
-            entry: Dict[str, Any] = {
-                'type': 'local',
-                'command': [cmd] + list(args),
-                'enabled': True,
-                'disabled': False,
-            }
-            if env:
-                entry['environment'] = env
-            servers_map[name] = entry
-    else:
-        for mcp_name, cmd_args in DEFAULT_MCP_SERVERS.items():
-            entry = {
-                'type': 'local',
-                'enabled': False,
-                'disabled': True,
-                'command': cmd_args,
-            }
-            servers_map[mcp_name] = entry
+            if name not in servers_map:
+                cmd = spec.get('command') or ''
+                args = spec.get('args') or []
+                env = spec.get('env') or {}
+                entry = {
+                    'type': 'local',
+                    'command': [cmd] + list(args),
+                    'enabled': True,
+                    'disabled': False,
+                }
+                if env:
+                    entry['environment'] = env
+                servers_map[name] = entry
 
     cfg_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
 

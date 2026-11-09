@@ -1624,7 +1624,7 @@ def setup_mcp_servers(non_interactive: bool = False) -> Dict[str, Any]:
 
     print("\n=== Model Context Protocol (MCP) Servers Setup (Optional) ===")
     print("MCP servers give your coding agents (OpenCode, Claude Code, Codex) tools for")
-    print("web fetching, library docs search, browser automation, and deep reasoning.\n")
+    print("web fetching, library docs search, document manipulation (docx/xlsx/pptx), browser automation, and reasoning.\n")
 
     tier1_keys = [k for k, v in DEFAULT_MCP_CATALOG.items() if v.get('tier') == 1]
     tier2_keys = [k for k, v in DEFAULT_MCP_CATALOG.items() if v.get('tier') == 2]
@@ -1648,18 +1648,18 @@ def setup_mcp_servers(non_interactive: bool = False) -> Dict[str, Any]:
                         'args': list(spec['args']),
                     }
     else:
-        print("[Tier 1] Zero-Config Coding & Research Servers (No API keys needed):")
+        print("[Tier 1] Zero-Config Coding, Research & Document Servers (No API keys needed):")
         for i, k in enumerate(tier1_keys, 1):
             spec = DEFAULT_MCP_CATALOG[k]
             cmd = spec['command']
             desc = spec['description']
             print(f"  [{i}] {k:20s} - {desc} ({cmd})")
         print("\nTier 1 options:")
-        print("  [A] Enable ALL 8 Tier 1 servers (Recommended)")
+        print(f"  [S] Keep all disabled (Default / Recommended - toggle on as needed)")
+        print(f"  [A] Enable ALL {len(tier1_keys)} Tier 1 servers")
         print("  [C] Custom select specific servers (comma-separated, e.g. 1,2,3,4)")
-        print("  [S] Skip Tier 1 servers")
 
-        ans = _prompt_choice("Select Tier 1 option (A/C/S)", ['a', 'all', 'c', 'custom', 's', 'skip'], default='a', non_interactive=non_interactive).lower()
+        ans = _prompt_choice("Select Tier 1 option (S/A/C)", ['s', 'skip', 'a', 'all', 'c', 'custom'], default='s', non_interactive=non_interactive).lower()
 
         chosen_tier1 = []
         if ans in ('a', 'all'):
