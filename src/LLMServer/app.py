@@ -1447,29 +1447,29 @@ def write_opencode_config(
 
     model_entry = {
         'name': alias,
-        'reasoning': True,
+        'capabilities': {
+            'tools': True,
+            'reasoning': {
+                'supported': True,
+                'effort': ['low', 'medium', 'high', 'xhigh'],
+            },
+        },
         'limit': {
             'context': ctx,
             'output': out_limit,
         },
-        'variants': {
-            'high': {'reasoningEffort': 'xhigh'},
-            'medium': {'reasoningEffort': 'medium'},
-            'low': {'reasoningEffort': 'low'},
-            'xhigh': {'reasoningEffort': 'xhigh'},
-        },
+        'variants': [
+            {'id': 'low', 'settings': {'reasoningEffort': 'low'}},
+            {'id': 'medium', 'settings': {'reasoningEffort': 'medium'}},
+            {'id': 'high', 'settings': {'reasoningEffort': 'high'}},
+            {'id': 'xhigh', 'settings': {'reasoningEffort': 'xhigh'}},
+        ],
     }
 
     provider_entry = {
         'package': 'aisdk:@ai-sdk/openai-compatible',
-        'npm': '@ai-sdk/openai-compatible',
         'name': f'llmCode ({alias})',
         'settings': {
-            'baseURL': f'http://127.0.0.1:{port}/v1',
-            'apiKey': f'{{file:{API_KEY_FILE.as_posix()}}}',
-            'timeout': 600000,
-        },
-        'options': {
             'baseURL': f'http://127.0.0.1:{port}/v1',
             'apiKey': f'{{file:{API_KEY_FILE.as_posix()}}}',
             'timeout': 600000,
@@ -1479,9 +1479,7 @@ def write_opencode_config(
         },
     }
 
-    providers = data.setdefault('providers', {})
     providers['llmcode'] = provider_entry
-    data['provider'] = providers
 
     data['model'] = f'llmcode/{alias}'
     data['default_agent'] = 'build'
@@ -1489,17 +1487,6 @@ def write_opencode_config(
         {'action': p, 'resource': '*', 'effect': 'allow'}
         for p in ('read', 'edit', 'glob', 'grep', 'list', 'shell', 'subagent', 'todowrite', 'question')
     ]
-    data['permission'] = {
-        'read': 'allow',
-        'edit': 'allow',
-        'glob': 'allow',
-        'grep': 'allow',
-        'list': 'allow',
-        'bash': 'allow',
-        'task': 'allow',
-        'todowrite': 'allow',
-        'question': 'allow',
-    }
 
     instr_list = []
     global_instr = HOME / '.config' / 'opencode' / 'instructions.md'
@@ -1531,7 +1518,6 @@ def write_opencode_config(
         entry: Dict[str, Any] = {
             'type': 'local',
             'command': [cmd] + list(args),
-            'enabled': is_active,
             'disabled': not is_active,
         }
         if env:
@@ -1548,7 +1534,6 @@ def write_opencode_config(
                 entry = {
                     'type': 'local',
                     'command': [cmd] + list(args),
-                    'enabled': True,
                     'disabled': False,
                 }
                 if env:

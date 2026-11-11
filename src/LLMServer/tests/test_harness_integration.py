@@ -28,6 +28,7 @@ from src.common.harness import (
 )
 from src.common.harness_config import (
     backup,
+    write_claude_settings,
     write_codex_profile,
     DEFAULT_MCP_SERVERS,
     BLOCK_BEGIN,
@@ -77,6 +78,16 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(env['ANTHROPIC_BASE_URL'], "http://127.0.0.1:8080")
         self.assertEqual(env['ANTHROPIC_MODEL'], "test-model")
         self.assertEqual(env['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'], "1")
+        self.assertEqual(env['ENABLE_TOOL_SEARCH'], "false")
+        self.assertEqual(env['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'], "1")
+
+        # write_claude_settings preserves both flags in settings.json and llmcode.settings.json
+        settings_path = write_claude_settings(self.home_dir, "http://127.0.0.1:8080", "test-model", context=65536)
+        local_settings_path = self.home_dir / '.claude' / 'llmcode.settings.json'
+        for p in (settings_path, local_settings_path):
+            parsed = json.loads(p.read_text(encoding='utf-8'))
+            self.assertEqual(parsed['env']['ENABLE_TOOL_SEARCH'], "false")
+            self.assertEqual(parsed['env']['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'], "1")
 
         # Context warnings
         warn_small = context_warning('claude', 8192)
@@ -248,6 +259,32 @@ class TestHarnessIntegration(unittest.TestCase):
         # Retired aider status returns 404 (route removed)
         r_aider = self.client.get('/api/aider/status')
         self.assertEqual(r_aider.status_code, 404)
+
+    def test_write_opencode_config_v2_schema(self):
+        """Verifies write_opencode_config emits clean v2 schema without legacy redundant keys."""
+        import src.LLMServer.app as app_mod
+
+        cfg_path = self.home_dir / '.config' / 'opencode' / 'opencode.jsonc'
+        with patch.object(app_mod, 'GLOBAL_OPENCODE_CONFIG', cfg_path), \
+             patch.object(app_mod, 'HOME', self.home_dir):
+            app_mod.write_opencode_config(self.tmp_dir, 'llamacpp', 8080, context_limit=65536, mcp_servers={})
+
+        data = json.loads(cfg_path.read_text(encoding='utf-8'))
+        self.assertEqual(data['model'], 'llmcode/llamacpp')
+        self.assertNotIn('provider', data)
+        self.assertNotIn('permission', data)
+        provider = data['providers']['llmcode']
+        self.assertNotIn('npm', provider)
+        self.assertNotIn('options', provider)
+        model = provider['models']['llamacpp']
+        self.assertNotIn('reasoning', model)
+        self.assertTrue(model['capabilities']['reasoning']['supported'])
+        self.assertIsInstance(model['variants'], list)
+        self.assertIn('repowise', data['mcp']['servers'])
+        self.assertIn('rea', data['mcp']['servers'])
+        for srv in data['mcp']['servers'].values():
+            self.assertNotIn('enabled', srv)
+            self.assertTrue(srv['disabled'])
 
 
 if __name__ == '__main__':

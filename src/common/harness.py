@@ -53,6 +53,8 @@ def claude_env(base_url: str, alias: str) -> Dict[str, str]:
         'ANTHROPIC_DEFAULT_HAIKU_MODEL': alias,
         'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
         'DISABLE_TELEMETRY': '1',
+        'ENABLE_TOOL_SEARCH': 'false',
+        'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS': '1',
         'API_TIMEOUT_MS': '600000',
     }
 

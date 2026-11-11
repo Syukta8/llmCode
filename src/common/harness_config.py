@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.common.harness import CODEX_KEY_ENV, CODEX_PROFILE
+from src.common.harness import CODEX_KEY_ENV, CODEX_PROFILE, claude_env
 
 BLOCK_BEGIN = '# >>> llmcode managed block (do not edit; rewritten on every launch) >>>'
 BLOCK_END = '# <<< llmcode managed block <<<'
@@ -87,6 +87,18 @@ DEFAULT_MCP_CATALOG: Dict[str, Dict[str, Any]] = {
         'args': ['pptx-mcp', 'serve'],
         'tier': 1,
         'description': 'PowerPoint (.pptx) presentation generation, slides, and editing',
+    },
+    'repowise': {
+        'command': 'uvx',
+        'args': ['repowise', 'mcp', '--transport', 'stdio'],
+        'tier': 1,
+        'description': 'Codebase intelligence — docs, dependency graph, git signals, and decisions',
+    },
+    'rea': {
+        'command': 'npx',
+        'args': ['-y', 'rea-agents', 'mcp'],
+        'tier': 1,
+        'description': 'Reverse engineering and binary/JS/WebMCP analysis tools',
     },
     # Tier 2: Cloud / API-key required utilities
     'github': {
@@ -221,17 +233,8 @@ def write_claude_settings(home: Path, base_url: str, alias: str, context: int = 
     env = data.get('env')
     if not isinstance(env, dict):
         env = {}
-    env.update({
-        'ANTHROPIC_BASE_URL': base_url,
-        'ANTHROPIC_MODEL': alias,
-        'ANTHROPIC_SMALL_FAST_MODEL': alias,
-        'ANTHROPIC_DEFAULT_OPUS_MODEL': alias,
-        'ANTHROPIC_DEFAULT_SONNET_MODEL': alias,
-        'ANTHROPIC_DEFAULT_HAIKU_MODEL': alias,
-        'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
-        'DISABLE_TELEMETRY': '1',
-        'API_TIMEOUT_MS': '600000',
-    })
+    claude_defaults = claude_env(base_url, alias)
+    env.update(claude_defaults)
     data['env'] = env
 
     new_text = json.dumps(data, indent=2) + '\n'
@@ -245,17 +248,7 @@ def write_claude_settings(home: Path, base_url: str, alias: str, context: int = 
         'defaultMode': 'bypassPermissions',
         'permissions': {'defaultMode': 'bypassPermissions'},
         'model': alias,
-        'env': {
-            'ANTHROPIC_BASE_URL': base_url,
-            'ANTHROPIC_MODEL': alias,
-            'ANTHROPIC_SMALL_FAST_MODEL': alias,
-            'ANTHROPIC_DEFAULT_OPUS_MODEL': alias,
-            'ANTHROPIC_DEFAULT_SONNET_MODEL': alias,
-            'ANTHROPIC_DEFAULT_HAIKU_MODEL': alias,
-            'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
-            'DISABLE_TELEMETRY': '1',
-            'API_TIMEOUT_MS': '600000',
-        },
+        'env': dict(claude_defaults),
     }
     llmcode_settings_file.write_text(json.dumps(local_payload, indent=2) + '\n', encoding='utf-8')
     return settings_file

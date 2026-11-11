@@ -1606,12 +1606,32 @@ def _ensure_litellm_proxy(venv_python: str) -> bool:
     return subprocess.run([venv_python, '-m', 'pip', 'install', '-q', '--no-warn-script-location', 'litellm[proxy]'], check=False).returncode == 0
 
 
+def _ensure_uv_available(non_interactive: bool = False) -> Optional[str]:
+    """Ensures `uvx` is available for Python-based MCP servers (`fetch`, `git`, `sqlite`, `pptx`, `repowise`)."""
+    uvx_exe = shutil.which('uvx')
+    if uvx_exe:
+        return uvx_exe
+    print("\nuvx (`uv`) is required for Python-based MCP servers.")
+    ans = _prompt_choice(
+        "Install `uv` via pip now? (y/n)",
+        ['y', 'yes', 'n', 'no'],
+        default='y',
+        non_interactive=non_interactive,
+    )
+    if ans in ('y', 'yes'):
+        try:
+            subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'uv'], check=False)
+        except Exception as e:
+            print(f"Failed to install uv via pip: {e}")
+    return shutil.which('uvx')
+
+
 def setup_mcp_servers(non_interactive: bool = False) -> Dict[str, Any]:
     """
     Configures optional Model Context Protocol (MCP) servers across OpenCode, Claude Code, and Codex.
     Follows a 2-tier design:
-      - Tier 1: 8 Zero-config local servers (uvx / npx)
-      - Tier 2: 4 Cloud / API-key servers (GitHub, Brave Search, Tavily, Firecrawl)
+      - Tier 1: Zero-config local servers (uvx / npx)
+      - Tier 2: Cloud / API-key servers (GitHub, Brave Search, Tavily, Firecrawl)
     Strict opt-in: writes only selected servers; persists to config/config.json under 'mcp'.
     """
     from src.common.harness_config import (
@@ -1729,6 +1749,9 @@ def setup_mcp_servers(non_interactive: bool = False) -> Dict[str, Any]:
         context = int(cfg.get('settings', {}).get('last_context') or context)
     except Exception:
         pass
+
+    if any(spec.get('command') == 'uvx' for spec in selected_servers.values()):
+        _ensure_uv_available(non_interactive=non_interactive)
 
     user_home = Path.home()
     base_url = f'http://127.0.0.1:{port}'
