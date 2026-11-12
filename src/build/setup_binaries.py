@@ -476,19 +476,27 @@ def scan_and_save_hardware() -> Dict[str, Any]:
 
     # Auto-tune build flags for llama.cpp, koboldcpp, and ollama
     parallel_jobs = max(2, min(16, cpu_cores - 1 if cpu_cores > 2 else 2))
+    is_msvc = (plat == 'windows' and cc_detail.startswith('MSVC'))
     llama_cmake_flags = [
         '-DCMAKE_BUILD_TYPE=Release',
         '-DGGML_NATIVE=ON',
-        '-DCMAKE_C_FLAGS=-O3 -march=native -mtune=native',
-        '-DCMAKE_CXX_FLAGS=-O3 -march=native -mtune=native',
     ]
+    if not is_msvc:
+        # GCC/Clang Release flags; MSVC receives /O2 from Release and SIMD from GGML_NATIVE=ON.
+        llama_cmake_flags.extend([
+            '-DCMAKE_C_FLAGS_RELEASE=-O3 -DNDEBUG -march=native -mtune=native',
+            '-DCMAKE_CXX_FLAGS_RELEASE=-O3 -DNDEBUG -march=native -mtune=native',
+        ])
     if gpu['acceleration'] == 'cuda' and nvcc_path:
         llama_cmake_flags.extend([
             '-DGGML_CUDA=ON',
             f'-DCMAKE_CUDA_COMPILER={nvcc_path}',
             '-DGGML_CUDA_FA_ALL_QUANTS=ON',
-            '-DCMAKE_CUDA_FLAGS=-O3 -use_fast_math',
         ])
+        if not is_msvc:
+            # Global CMAKE_CUDA_FLAGS (-O3) breaks MSVC CMake TryCompile Debug (/RTC1 vs /O2 D8016);
+            # ggml-cuda already applies -use_fast_math and Release applies /O2.
+            llama_cmake_flags.append('-DCMAKE_CUDA_FLAGS_RELEASE=-O3 -DNDEBUG -use_fast_math')
         cc_str = gpu.get('compute_capability', '')
         try:
             cc_float = float(cc_str)
@@ -818,6 +826,20 @@ def download_file(url: str, dest: Path) -> Path:
 # ==============================================================================
 # Engine 1: llama.cpp (Hardware-Tuned via config/hardware.json)
 # ==============================================================================
+def _filter_cmake_flags_for_msvc(flags: List[str]) -> List[str]:
+    """Strip GCC/global-CUDA flags that collide with MSVC (D8016 /RTC1 vs /O2, D9002)."""
+    filtered: List[str] = []
+    for flag in flags:
+        if flag.startswith(('-DCMAKE_C_FLAGS=', '-DCMAKE_CXX_FLAGS=')) and (
+            '-O3' in flag or '-march=' in flag or '-mtune=' in flag
+        ):
+            continue
+        if flag.startswith('-DCMAKE_CUDA_FLAGS=') and '-O3' in flag:
+            continue
+        filtered.append(flag)
+    return filtered
+
+
 def compile_llama_cpp(accel: str) -> bool:
     """Clones and compiles llama.cpp inside src/llama.cpp using flags from config/hardware.json."""
     hw = load_hardware() or scan_and_save_hardware()
@@ -826,7 +848,10 @@ def compile_llama_cpp(accel: str) -> bool:
         print(f"Cloning llama.cpp into {src_dir} ...")
         subprocess.run(['git', 'clone', '--depth', '1', 'https://github.com/ggml-org/llama.cpp.git', str(src_dir)], check=True)
 
-    cmake_flags = hw.get('build_config', {}).get('llama_cpp_cmake_flags', ['-DCMAKE_BUILD_TYPE=Release'])
+    cmake_flags = list(hw.get('build_config', {}).get('llama_cpp_cmake_flags', ['-DCMAKE_BUILD_TYPE=Release']))
+    msvc = find_windows_msvc() if os.name == 'nt' else None
+    if msvc:
+        cmake_flags = _filter_cmake_flags_for_msvc(cmake_flags)
     use_cuda = any('GGML_CUDA=ON' in f for f in cmake_flags)
     use_metal = any('GGML_METAL=ON' in f for f in cmake_flags)
 
@@ -853,7 +878,6 @@ def compile_llama_cpp(accel: str) -> bool:
         env['PATH'] = nvcc_dir + os.pathsep + env.get('PATH', '')
     try:
         if os.name == 'nt':
-            msvc = find_windows_msvc()
             if msvc and msvc != 'PATH':
                 cfg_line = f'call "{msvc}" && ' + ' '.join(f'"{a}"' if ' ' in a else a for a in cmake_args)
                 bld_line = f'call "{msvc}" && ' + ' '.join(f'"{a}"' if ' ' in a else a for a in build_cmd)
@@ -872,6 +896,166 @@ def compile_llama_cpp(accel: str) -> bool:
         return False
 
 
+_FALLBACK_LLAMA_TAG = 'b12304'
+
+
+def _detect_local_cuda_version() -> Optional[Tuple[int, int]]:
+    """Parses installed nvcc major/minor version when available."""
+    nvcc_bin = _find_nvcc()
+    if not nvcc_bin:
+        return None
+    try:
+        res = subprocess.run([nvcc_bin, '--version'], capture_output=True, text=True, timeout=5)
+        m = re.search(r'release\s+(\d+)\.(\d+)', res.stdout or '')
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    except Exception:
+        pass
+    return None
+
+
+def _preferred_cuda_tag(hw: Optional[Dict[str, Any]] = None) -> str:
+    """Chooses compatible prebuilt CUDA flavor ('12.4' or '13.5') from GPU arch and local CUDA.
+    Pascal/GTX 1000 (< 7.5) requires CUDA 12.4 because CUDA 13.x dropped sm_61.
+    """
+    hw_data = hw if hw is not None else load_hardware()
+    cc_str = (hw_data or {}).get('gpu', {}).get('compute_capability', '')
+    try:
+        cc_float = float(cc_str)
+    except (ValueError, TypeError):
+        cc_float = 0.0
+    if 0 < cc_float < 7.5:
+        return '12.4'
+    local_cuda = _detect_local_cuda_version()
+    if local_cuda and local_cuda[0] >= 13:
+        return '13.5'
+    return '12.4'
+
+
+def _extract_asset_cuda_ver(name_lower: str) -> str:
+    m = re.search(r'(?:cuda|cu)[-_]?(\d+\.\d+)', name_lower)
+    return m.group(1) if m else ''
+
+
+def _select_llama_release_assets(
+    assets: List[Dict[str, Any]],
+    plat: str,
+    machine: str,
+    accel: str,
+    prefer_cuda_ver: str = '12.4',
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Selects (target_asset, cudart_asset) from GitHub release assets for platform/arch/accel."""
+    is_arm64 = machine.lower() in ('arm64', 'aarch64')
+    target_arch = 'arm64' if is_arm64 else 'x64'
+
+    def _matches_arch(name: str) -> bool:
+        if target_arch == 'arm64':
+            return 'arm64' in name or 'aarch64' in name
+        return ('x64' in name or 'amd64' in name) and 'arm64' not in name and 'aarch64' not in name
+
+    if plat == 'windows':
+        win_assets = [
+            a for a in assets
+            if ('bin-win' in a.get('name', '').lower() or '-win' in a.get('name', '').lower())
+            and _matches_arch(a.get('name', '').lower())
+        ]
+        if accel == 'cuda':
+            cuda_bins = [
+                a for a in win_assets
+                if not a['name'].lower().startswith('cudart-')
+                and ('cuda' in a['name'].lower() or 'cu12' in a['name'].lower() or 'cu11' in a['name'].lower())
+            ]
+            cudarts = [
+                a for a in win_assets
+                if a['name'].lower().startswith('cudart-')
+                and ('cuda' in a['name'].lower() or 'cu12' in a['name'].lower() or 'cu11' in a['name'].lower())
+            ]
+            target_asset = next(
+                (a for a in cuda_bins if _extract_asset_cuda_ver(a['name'].lower()) == prefer_cuda_ver),
+                cuda_bins[0] if cuda_bins else None,
+            )
+            chosen_ver = _extract_asset_cuda_ver(target_asset['name'].lower()) if target_asset else prefer_cuda_ver
+            cudart_asset = next(
+                (a for a in cudarts if _extract_asset_cuda_ver(a['name'].lower()) == chosen_ver),
+                cudarts[0] if cudarts else None,
+            )
+            return target_asset, cudart_asset
+
+        non_cuda = [
+            a for a in win_assets
+            if not a['name'].lower().startswith('cudart-')
+            and not any(tag in a['name'].lower() for tag in ('cuda', 'cu12', 'cu11', 'rocm', 'sycl', 'opencl', 'openvino'))
+        ]
+        for pref in ('cpu', 'avx2', 'vulkan'):
+            hit = next((a for a in non_cuda if pref in a['name'].lower()), None)
+            if hit:
+                return hit, None
+        return (non_cuda[0] if non_cuda else None), None
+
+    if plat == 'macos':
+        mac_assets = [
+            a for a in assets
+            if ('bin-macos' in a.get('name', '').lower() or '-macos' in a.get('name', '').lower() or '-darwin' in a.get('name', '').lower())
+            and 'xcframework' not in a.get('name', '').lower()
+            and _matches_arch(a.get('name', '').lower())
+        ]
+        return (mac_assets[0] if mac_assets else None), None
+
+    # Linux
+    linux_assets = [
+        a for a in assets
+        if ('bin-ubuntu' in a.get('name', '').lower() or 'bin-linux' in a.get('name', '').lower() or '-linux' in a.get('name', '').lower())
+        and _matches_arch(a.get('name', '').lower())
+        and not any(skip in a.get('name', '').lower() for skip in ('s390x', 'snapdragon', 'rocm', 'sycl', 'openvino'))
+    ]
+    linux_bins = [a for a in linux_assets if not a['name'].lower().startswith('cudart-')]
+    if accel == 'cuda':
+        cuda_bins = [a for a in linux_bins if 'cuda' in a['name'].lower()]
+        target_asset = next(
+            (a for a in cuda_bins if _extract_asset_cuda_ver(a['name'].lower()).startswith(prefer_cuda_ver.split('.')[0])),
+            cuda_bins[0] if cuda_bins else None,
+        )
+        if not target_asset:
+            target_asset = next((a for a in linux_bins if 'vulkan' in a['name'].lower()), None)
+        if target_asset:
+            chosen_ver = _extract_asset_cuda_ver(target_asset['name'].lower())
+            cudart_asset = next(
+                (a for a in linux_assets if a['name'].lower().startswith('cudart-') and (not chosen_ver or _extract_asset_cuda_ver(a['name'].lower()) == chosen_ver)),
+                None,
+            )
+            return target_asset, cudart_asset
+    cpu_bins = [a for a in linux_bins if 'cuda' not in a['name'].lower() and 'vulkan' not in a['name'].lower()]
+    if cpu_bins:
+        return cpu_bins[0], None
+    return (linux_bins[0] if linux_bins else None), None
+
+
+def _fetch_llama_release_assets() -> List[Dict[str, Any]]:
+    """Fetches assets from the newest non-draft llama.cpp GitHub release that contains binary archives.
+    Avoids metadata-only tags (such as v0.9.0 /releases/latest with only nightly-tag.txt).
+    """
+    headers = {'User-Agent': 'llmCode-Installer/1.0'}
+    try:
+        req = urllib.request.Request("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10", headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            releases = json.loads(r.read())
+        for rel in releases:
+            if rel.get('draft'):
+                continue
+            assets = rel.get('assets', [])
+            if any('bin-' in a.get('name', '').lower() for a in assets):
+                return assets
+    except Exception as e:
+        print(f"Warning: Could not query llama.cpp GitHub releases API: {e}")
+
+    try:
+        req = urllib.request.Request("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest", headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read()).get('assets', [])
+    except Exception:
+        return []
+
+
 def download_prebuilt_llama_cpp(accel: str) -> bool:
     """Downloads official prebuilt llama.cpp release archive from GitHub for Windows, macOS, or Linux.
     On Windows with CUDA, downloads BOTH the llama CUDA binary archive AND the mandatory
@@ -883,64 +1067,39 @@ def download_prebuilt_llama_cpp(accel: str) -> bool:
     dest_dir = BIN_DIR / plat
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    api_url = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
-    req = urllib.request.Request(api_url, headers={'User-Agent': 'llmCode-Installer/1.0'})
-    release_data = {}
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            release_data = json.loads(r.read())
-    except Exception as e:
-        print(f"Warning: Could not query llama.cpp GitHub API: {e}")
-
-    assets = release_data.get('assets', [])
-    target_asset = None
-    cudart_asset = None
-    linux_fallback_asset = None
-
-    for asset in assets:
-        name = asset.get('name', '').lower()
-        if plat == 'windows' and ('bin-win' in name or '-win' in name) and ('x64' in name or 'amd64' in name):
-            if accel == 'cuda' and ('cuda' in name or 'cu12' in name or 'cu11' in name):
-                if name.startswith('cudart-'):
-                    if not cudart_asset:
-                        cudart_asset = asset
-                elif not target_asset:
-                    target_asset = asset
-            elif accel != 'cuda' and not name.startswith('cudart-') and ('avx2' in name or 'cpu' in name or 'vulkan' in name or 'x64' in name):
-                if not target_asset:
-                    target_asset = asset
-        elif plat == 'macos' and ('bin-macos' in name or '-macos' in name or '-darwin' in name):
-            arch = 'arm64' if platform.machine().lower() in ('arm64', 'aarch64') else 'x64'
-            if arch in name and not target_asset:
-                target_asset = asset
-        elif plat == 'linux' and ('bin-ubuntu' in name or 'bin-linux' in name or '-linux' in name) and ('x64' in name or 'amd64' in name):
-            if accel == 'cuda' and ('cuda' in name or 'vulkan' in name):
-                if not target_asset:
-                    target_asset = asset
-            elif not linux_fallback_asset:
-                linux_fallback_asset = asset
-
-    if plat == 'linux' and not target_asset and linux_fallback_asset:
-        target_asset = linux_fallback_asset
+    assets = _fetch_llama_release_assets()
+    prefer_cuda_ver = _preferred_cuda_tag()
+    target_asset, cudart_asset = _select_llama_release_assets(
+        assets, plat, platform.machine(), accel, prefer_cuda_ver=prefer_cuda_ver
+    )
 
     if not target_asset:
-        # Fallback to direct well-known GitHub release artifact URLs
+        # Fallback to pinned known release tag URLs (avoiding /releases/latest which may be metadata-only)
+        tag = _FALLBACK_LLAMA_TAG
+        is_arm64 = platform.machine().lower() in ('arm64', 'aarch64')
         if plat == 'windows':
-            asset_name = 'llama-b4850-bin-win-cuda-cu12.4-x64.zip' if accel == 'cuda' else 'llama-b4850-bin-win-avx2-x64.zip'
+            arch_str = 'arm64' if is_arm64 else 'x64'
+            if accel == 'cuda':
+                asset_name = f"llama-{tag}-bin-win-cuda-{prefer_cuda_ver}-{arch_str}.zip"
+            else:
+                asset_name = f"llama-{tag}-bin-win-cpu-{arch_str}.zip"
         elif plat == 'macos':
-            asset_name = 'llama-b4850-bin-macos-arm64.zip' if platform.machine().lower() in ('arm64', 'aarch64') else 'llama-b4850-bin-macos-x64.zip'
+            asset_name = f"llama-{tag}-bin-macos-{'arm64' if is_arm64 else 'x64'}.tar.gz"
         else:
-            asset_name = 'llama-b4850-bin-ubuntu-x64.zip'
+            arch_str = 'arm64' if is_arm64 else 'x64'
+            asset_name = f"llama-{tag}-bin-ubuntu-{arch_str}.tar.gz"
         target_asset = {
             'name': asset_name,
-            'browser_download_url': f"https://github.com/ggml-org/llama.cpp/releases/latest/download/{asset_name}"
+            'browser_download_url': f"https://github.com/ggml-org/llama.cpp/releases/download/{tag}/{asset_name}"
         }
 
     if plat == 'windows' and accel == 'cuda' and not cudart_asset:
-        cudart_name = 'cudart-llama-bin-win-cuda-12.4-x64.zip'
+        arch_str = 'arm64' if platform.machine().lower() in ('arm64', 'aarch64') else 'x64'
+        chosen_ver = _extract_asset_cuda_ver(target_asset['name'].lower()) or prefer_cuda_ver
+        cudart_name = f"cudart-llama-bin-win-cuda-{chosen_ver}-{arch_str}.zip"
         cudart_asset = {
             'name': cudart_name,
-            'browser_download_url': f"https://github.com/ggml-org/llama.cpp/releases/latest/download/{cudart_name}"
+            'browser_download_url': f"https://github.com/ggml-org/llama.cpp/releases/download/{_FALLBACK_LLAMA_TAG}/{cudart_name}"
         }
 
     # Clean stale DLLs/binaries in dest_dir before extracting so switching CPU -> CUDA replaces ggml DLLs cleanly
@@ -968,7 +1127,8 @@ def download_prebuilt_llama_cpp(accel: str) -> bool:
 
     if cudart_asset:
         print(f"Downloading companion CUDA runtime DLLs ({cudart_asset['name']})...")
-        _download_and_extract(cudart_asset)
+        if not _download_and_extract(cudart_asset) and plat == 'windows' and accel == 'cuda':
+            return False
 
     if not _download_and_extract(target_asset):
         return False
@@ -1963,36 +2123,48 @@ def main(non_interactive: bool = False, uninstall: bool = False):
     can_compile = verify_and_install_requirements(reqs, non_interactive=non_interactive)
 
     # 4. Execute engine compilation or download
+    failed_engines: List[str] = []
     if selections['llama.cpp'] == '1':
         if can_compile:
-            if not compile_llama_cpp(accel):
+            ok = compile_llama_cpp(accel)
+            if not ok:
                 print("Falling back to prebuilt llama.cpp binary...")
-                download_prebuilt_llama_cpp(accel)
+                ok = download_prebuilt_llama_cpp(accel)
         else:
             print("Skipping llama.cpp source build due to missing compilers; downloading prebuilt binary...")
-            download_prebuilt_llama_cpp(accel)
+            ok = download_prebuilt_llama_cpp(accel)
+        if not ok:
+            failed_engines.append('llama.cpp')
     elif selections['llama.cpp'] == '2':
-        download_prebuilt_llama_cpp(accel)
+        if not download_prebuilt_llama_cpp(accel):
+            failed_engines.append('llama.cpp')
 
     if selections['koboldcpp'] == '1':
         if can_compile:
-            compile_koboldcpp(accel)
+            ok = compile_koboldcpp(accel)
         else:
             print("Skipping koboldcpp source build; downloading prebuilt binary...")
-            download_prebuilt_koboldcpp(accel)
+            ok = download_prebuilt_koboldcpp(accel)
+        if not ok:
+            failed_engines.append('koboldcpp')
     elif selections['koboldcpp'] == '2':
-        download_prebuilt_koboldcpp(accel)
+        if not download_prebuilt_koboldcpp(accel):
+            failed_engines.append('koboldcpp')
 
     if selections['ollama'] == '1':
         if can_compile and shutil.which('go'):
-            if not compile_ollama(accel):
+            ok = compile_ollama(accel)
+            if not ok:
                 print("Falling back to prebuilt Ollama binary...")
-                download_prebuilt_ollama()
+                ok = download_prebuilt_ollama()
         else:
             print("Go compiler not present; downloading prebuilt Ollama binary...")
-            download_prebuilt_ollama()
+            ok = download_prebuilt_ollama()
+        if not ok:
+            failed_engines.append('ollama')
     elif selections['ollama'] == '2':
-        download_prebuilt_ollama()
+        if not download_prebuilt_ollama():
+            failed_engines.append('ollama')
 
     # 5. Install CLI coding agents (OpenCode, Claude Code & Codex) inside llm-dash .venv
     venv_py = REPO_ROOT / 'src' / 'LLMServer' / '.venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python3')
@@ -2021,8 +2193,13 @@ def main(non_interactive: bool = False, uninstall: bool = False):
     for name in ('opencode', 'claude', 'codex'):
         print(f"  {name + ' (.venv)':<17}: {cfg['agents'].get(name) or 'not installed'}")
 
+    if failed_engines:
+        print(f"\n[ERROR] Selected backend engine(s) failed to install: {', '.join(failed_engines)}")
+        return False
+    return True
+
 
 if __name__ == '__main__':
     non_int = '--non-interactive' in sys.argv or '-y' in sys.argv
     uninst = '--uninstall' in sys.argv
-    main(non_interactive=non_int, uninstall=uninst)
+    sys.exit(0 if main(non_interactive=non_int, uninstall=uninst) is not False else 1)

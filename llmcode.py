@@ -128,9 +128,13 @@ def cmd_setup(args):
 
     from src.build.setup_binaries import main as run_binary_setup
     non_int = getattr(args, 'non_interactive', False) or getattr(args, 'yes', False)
-    run_binary_setup(non_interactive=non_int)
+    ok = run_binary_setup(non_interactive=non_int)
 
     sync_config(apply_hardware_defaults=True)
+    if ok is False:
+        print("\n[ERROR] Setup failed: one or more selected backend engines did not install.")
+        return 1
+
     from src.build.deploy_state import save_deploy_state
     save_deploy_state(REPO_ROOT)
     print(f"\nSetup completed. Configuration saved to: {CONFIG_FILE}")
@@ -142,10 +146,10 @@ def _reinstall_module_pip(py_exe: str, server_dir: Path):
     subprocess.run([py_exe, '-m', 'pip', 'install', '-q', '--no-warn-script-location', '-r', str(server_dir / 'requirements.txt')], check=True)
 
 
-def _reinstall_module_engines(non_interactive: bool):
+def _reinstall_module_engines(non_interactive: bool) -> bool:
     from src.build.setup_binaries import main as run_engine_setup
     print("\n[Module: engines] Running backend engine setup...")
-    run_engine_setup(non_interactive=non_interactive)
+    return run_engine_setup(non_interactive=non_interactive) is not False
 
 
 def _reinstall_module_agents(py_exe: str, non_interactive: bool):
@@ -225,6 +229,7 @@ def cmd_check_update(args):
             print("  [4] Skip reinstall")
             choice = input("Enter choice [1]: ").strip() or '1'
 
+    engines_ok = True
     if choice == '3':
         print("\nRunning full setup from scratch...")
         return cmd_setup(args)
@@ -250,7 +255,7 @@ def cmd_check_update(args):
         if '1' in sub_choices:
             _reinstall_module_pip(py_exe, server_dir)
         if '2' in sub_choices:
-            _reinstall_module_engines(non_interactive)
+            engines_ok = _reinstall_module_engines(non_interactive)
         if '3' in sub_choices:
             _reinstall_module_agents(py_exe, non_interactive)
         if '4' in sub_choices:
@@ -281,7 +286,7 @@ def cmd_check_update(args):
                 ans = input("Re-run backend engine setup now? [y/N]: ").strip().lower()
                 proceed = ans in ('y', 'yes')
             if proceed:
-                _reinstall_module_engines(non_interactive)
+                engines_ok = _reinstall_module_engines(non_interactive)
             else:
                 print("Skipping engine update.")
 
@@ -308,6 +313,10 @@ def cmd_check_update(args):
                 cmd_dash(args)
             else:
                 print("Dashboard restart skipped. Changes will take effect on next launch.")
+
+    if not engines_ok:
+        print("\n[ERROR] Update incomplete: backend engine setup failed.")
+        return 1
 
     save_deploy_state(REPO_ROOT)
     print("\n✓ Incremental update completed successfully.")
