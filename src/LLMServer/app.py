@@ -60,7 +60,7 @@ from src.common.harness_config import (
     DEFAULT_MCP_CATALOG,
     DEFAULT_MCP_SERVERS,
 )
-from src.common.endpoint import resolve_base_url, stop_litellm_proxy, proxy_status
+from src.common.endpoint import ensure_litellm_proxy, resolve_base_url, stop_litellm_proxy, proxy_status
 
 # Auto-verify and sync paths in config/config.json on server startup
 _initial_cfg = sync_config()
@@ -1107,8 +1107,8 @@ def launch_backend_process(backend, path, params):
     return args
 
 
-def _sync_external_harnesses(alias: str, context: int, expected_key: Optional[str]) -> None:
-    """Probes native endpoints and syncs external Claude/Codex configs + LiteLLM proxy once the engine is healthy."""
+def _sync_external_harnesses(alias: str, context: int, expected_key: Optional[str], backend: str = 'llama.cpp') -> None:
+    """Starts LiteLLM proxy directly on deploy and syncs external Claude/Codex configs."""
     cfg = load_config()
     selected = set(get_selected_agents(cfg))
     agents = cfg.get('agents', {})
@@ -1118,33 +1118,29 @@ def _sync_external_harnesses(alias: str, context: int, expected_key: Optional[st
         return
 
     key = expected_key or ''
-    if want_claude:
+    proxy_url: Optional[str] = None
+    if want_claude or backend != 'llama.cpp':
         try:
-            base_url, _ = resolve_base_url('anthropic', PORT, alias, key)
-            write_claude_settings(HOME, base_url, alias, context=context)
-        except Exception:
-            pass
+            proxy_url = ensure_litellm_proxy(f'http://127.0.0.1:{PORT}', PORT, alias, key)
+        except Exception as exc:
+            print(f'[harness-sync] LiteLLM proxy start failed: {exc}', flush=True)
+
+    if want_claude and proxy_url:
+        try:
+            write_claude_settings(HOME, proxy_url, alias, context=context)
+        except Exception as exc:
+            print(f'[harness-sync] Claude settings sync failed: {exc}', flush=True)
+
     if want_codex:
-        try:
-            base_url, _ = resolve_base_url('responses', PORT, alias, key)
-            write_codex_profile(HOME, base_url, alias, context=context)
-            write_codex_default_config(HOME, base_url, alias, context=context)
-            if agents.get('codex'):
-                write_codex_shim(HOME, agents['codex'], key_file=API_KEY_FILE, venv_dir=ROOT / '.venv')
-        except Exception:
-            pass
-
-
-def _wait_and_sync_external_harnesses(alias: str, context: int, expected_key: Optional[str], timeout_s: float = 180.0) -> None:
-    """Waits for deployed engine health, then prepares proxy + external terminal configs."""
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if not alive() or get_current_api_key() != expected_key:
-            return
-        if server_health():
-            _sync_external_harnesses(alias, context, expected_key)
-            return
-        time.sleep(2.0)
+        codex_url = f'http://127.0.0.1:{PORT}' if backend == 'llama.cpp' else proxy_url
+        if codex_url:
+            try:
+                write_codex_profile(HOME, codex_url, alias, context=context)
+                write_codex_default_config(HOME, codex_url, alias, context=context)
+                if agents.get('codex'):
+                    write_codex_shim(HOME, agents['codex'], key_file=API_KEY_FILE, venv_dir=ROOT / '.venv')
+            except Exception as exc:
+                print(f'[harness-sync] Codex config sync failed: {exc}', flush=True)
 
 
 @app.post('/api/start')
@@ -1188,8 +1184,8 @@ def start(params: Deploy):
         if 'opencode' in get_selected_agents(cfg_now) or cfg_now.get('agents', {}).get('opencode_installed'):
             write_opencode_config(None, params.alias, PORT, context_limit=params.context)
         threading.Thread(
-            target=_wait_and_sync_external_harnesses,
-            args=(params.alias, params.context, get_current_api_key()),
+            target=_sync_external_harnesses,
+            args=(params.alias, params.context, get_current_api_key(), params.backend),
             daemon=True,
             name='harness-sync',
         ).start()

@@ -16,7 +16,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from src.common.paths import CONFIG_DIR, LOG_DIR
+from src.common.paths import CONFIG_DIR, LOG_DIR, REPO_ROOT
 
 PROXY_PORT_OFFSET = 100
 PROXY_CONFIG_FILE = CONFIG_DIR / 'litellm_proxy.yaml'
@@ -72,7 +72,10 @@ def _proxy_yaml(engine_url: str, alias: str) -> str:
         )
     return (
         'model_list:\n' + ''.join(entries) +
-        'litellm_settings:\n  drop_params: true\n'
+        'litellm_settings:\n'
+        '  drop_params: true\n'
+        '  callbacks:\n'
+        '    - src.common.litellm_hooks.proxy_effort_hook\n'
         'general_settings:\n'
         '  master_key: os.environ/LLMCODE_ENGINE_KEY\n'
         '  dangerously_permit_weak_or_unset_master_key: true\n'
@@ -98,8 +101,13 @@ def ensure_litellm_proxy(engine_url: str, engine_port: int, alias: str, api_key:
             raise RuntimeError('LiteLLM proxy not installed in .venv; rerun setup (litellm[proxy]).')
         PROXY_CONFIG_FILE.write_text(_proxy_yaml(engine_url, alias), encoding='utf-8')
         PROXY_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        existing_pypath = os.environ.get('PYTHONPATH', '')
+        pypath = f'{REPO_ROOT}{os.pathsep}{existing_pypath}' if existing_pypath else str(REPO_ROOT)
         env = {
             **os.environ,
+            'PYTHONPATH': pypath,
+            'PYTHONUTF8': '1',
+            'PYTHONIOENCODING': 'utf-8',
             'LLMCODE_ENGINE_KEY': api_key,
             'LITELLM_MASTER_KEY': api_key,
             'LITELLM_DANGEROUSLY_PERMIT_WEAK_OR_UNSET_MASTER_KEY': 'true',
@@ -107,11 +115,11 @@ def ensure_litellm_proxy(engine_url: str, engine_port: int, alias: str, api_key:
             # system-message merge that Qwen-style templates need; force chat/completions.
             'LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES': 'true',
         }
-        log = open(PROXY_LOG_FILE, 'a', encoding='utf-8')
-        _proxy['proc'] = subprocess.Popen(
-            [str(exe), '--config', str(PROXY_CONFIG_FILE), '--host', '127.0.0.1', '--port', str(port)],
-            stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=(sys.platform != 'win32'),
-        )
+        with open(PROXY_LOG_FILE, 'a', encoding='utf-8') as log:
+            _proxy['proc'] = subprocess.Popen(
+                [str(exe), '--config', str(PROXY_CONFIG_FILE), '--host', '127.0.0.1', '--port', str(port)],
+                stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=(sys.platform != 'win32'),
+            )
         _proxy['signature'] = signature
         _proxy['port'] = port
     _wait_ready(port)

@@ -344,7 +344,7 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertFalse((isolated_home / '.codex').exists())
 
     def test_sync_external_harnesses_updates_proxy_base_url(self):
-        """Verifies _sync_external_harnesses probes endpoints and syncs proxy base_url into Claude settings."""
+        """Verifies _sync_external_harnesses starts proxy directly and syncs proxy base_url into Claude settings."""
         import src.LLMServer.app as app_mod
 
         fake_cfg = {
@@ -353,13 +353,60 @@ class TestHarnessIntegration(unittest.TestCase):
         }
         with patch.object(app_mod, 'HOME', self.home_dir), \
              patch.object(app_mod, 'load_config', return_value=fake_cfg), \
-             patch.object(app_mod, 'resolve_base_url', return_value=('http://127.0.0.1:8180', 'proxy')) as mock_res:
+             patch.object(app_mod, 'ensure_litellm_proxy', return_value='http://127.0.0.1:8180') as mock_proxy:
             app_mod._sync_external_harnesses('llamacpp', 65536, 'sk-test')
 
-        mock_res.assert_called_once_with('anthropic', app_mod.PORT, 'llamacpp', 'sk-test')
+        mock_proxy.assert_called_once_with(f'http://127.0.0.1:{app_mod.PORT}', app_mod.PORT, 'llamacpp', 'sk-test')
         parsed = json.loads((self.home_dir / '.claude' / 'settings.json').read_text(encoding='utf-8'))
         self.assertEqual(parsed['env']['ANTHROPIC_BASE_URL'], 'http://127.0.0.1:8180')
         self.assertIn('apiKeyHelper', parsed)
+
+    def test_litellm_proxy_sets_utf8_env(self):
+        """Verifies ensure_litellm_proxy exports UTF-8 env vars so Windows cp1252 does not crash banner output."""
+        import src.common.endpoint as ep
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        fake_exe = self.tmp_dir / 'litellm.exe'
+        fake_exe.write_text('', encoding='utf-8')
+        fake_yaml = self.tmp_dir / 'litellm_proxy.yaml'
+        fake_log = self.tmp_dir / 'litellm-proxy.log'
+
+        with patch.object(ep, '_litellm_bin', return_value=fake_exe), \
+             patch.object(ep, 'PROXY_CONFIG_FILE', fake_yaml), \
+             patch.object(ep, 'PROXY_LOG_FILE', fake_log), \
+             patch.object(ep, '_proxy', {'proc': None, 'signature': None, 'port': None}), \
+             patch.object(ep, '_wait_ready'), \
+             patch('subprocess.Popen', return_value=mock_proc) as mock_popen:
+            url = ep.ensure_litellm_proxy('http://127.0.0.1:8080', 8080, 'llamacpp', 'sk-test')
+
+        self.assertEqual(url, 'http://127.0.0.1:8180')
+        popen_env = mock_popen.call_args.kwargs['env']
+        self.assertEqual(popen_env['PYTHONUTF8'], '1')
+        self.assertEqual(popen_env['PYTHONIOENCODING'], 'utf-8')
+        self.assertIn(str(ep.REPO_ROOT), popen_env['PYTHONPATH'])
+        yaml_text = fake_yaml.read_text(encoding='utf-8')
+        self.assertIn('src.common.litellm_hooks.proxy_effort_hook', yaml_text)
+
+    def test_reasoning_effort_normalizer_maps_high_to_xhigh(self):
+        """Verifies LiteLLM pre-call normalizer maps high/max effort and large thinking budgets to xhigh."""
+        from src.common.litellm_hooks import normalize_reasoning_effort_payload
+
+        self.assertEqual(normalize_reasoning_effort_payload({'reasoning_effort': 'high'})['reasoning_effort'], 'xhigh')
+        self.assertEqual(normalize_reasoning_effort_payload({'reasoning_effort': 'max'})['reasoning_effort'], 'xhigh')
+        self.assertEqual(normalize_reasoning_effort_payload({'reasoning_effort': 'xhigh'})['reasoning_effort'], 'xhigh')
+        self.assertEqual(normalize_reasoning_effort_payload({'reasoning_effort': 'medium'})['reasoning_effort'], 'medium')
+        self.assertEqual(normalize_reasoning_effort_payload({'reasoning_effort': 'low'})['reasoning_effort'], 'low')
+
+        oc_high = normalize_reasoning_effort_payload({'output_config': {'effort': 'high'}})
+        self.assertEqual(oc_high['output_config']['effort'], 'xhigh')
+        oc_med = normalize_reasoning_effort_payload({'output_config': {'effort': 'medium'}})
+        self.assertEqual(oc_med['output_config']['effort'], 'medium')
+
+        th_high = normalize_reasoning_effort_payload({'thinking': {'type': 'enabled', 'budget_tokens': 16000}})
+        self.assertEqual(th_high['reasoning_effort'], 'xhigh')
+        th_low = normalize_reasoning_effort_payload({'thinking': {'type': 'enabled', 'budget_tokens': 1024}})
+        self.assertNotIn('reasoning_effort', th_low)
 
 
 if __name__ == '__main__':
