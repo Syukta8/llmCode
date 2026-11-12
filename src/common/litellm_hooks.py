@@ -8,9 +8,9 @@ while local models like Qwen3.8 only support `xhigh`, `medium`, and `low` in the
 from typing import Any, Dict
 
 from litellm.integrations.custom_logger import CustomLogger
+from litellm.litellm_core_utils.reasoning_effort_utils import reasoning_effort_from_thinking_budget
 
 _HIGH_EFFORTS = frozenset({'high', 'max'})
-_HIGH_THINKING_BUDGET_THRESHOLD = 8192
 
 
 def normalize_reasoning_effort_payload(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -32,14 +32,19 @@ def normalize_reasoning_effort_payload(data: Dict[str, Any]) -> Dict[str, Any]:
                 output_cfg['effort'] = 'xhigh'
 
     thinking = data.get('thinking')
-    if isinstance(thinking, dict) and not data.get('reasoning_effort') and not has_output_effort:
-        t_type = thinking.get('type')
-        try:
-            budget = int(thinking.get('budget_tokens') or 0)
-        except (TypeError, ValueError):
-            budget = 0
-        if t_type == 'adaptive' or budget >= _HIGH_THINKING_BUDGET_THRESHOLD:
-            data['reasoning_effort'] = 'xhigh'
+    if isinstance(thinking, dict):
+        thinking_type = thinking.get('type')
+        budget = thinking.get('budget_tokens')
+        if thinking_type == 'enabled' and isinstance(budget, (int, float)) and not isinstance(budget, bool):
+            # LiteLLM translates legacy budgets after this hook. Supply the mapped
+            # effort as adaptive input so its adapter cannot recreate "high".
+            mapped = reasoning_effort_from_thinking_budget(budget)
+            mapped = {'high': 'xhigh', 'minimal': 'low'}.get(mapped, mapped)
+            data['thinking'] = {**thinking, 'type': 'adaptive'}
+            data['thinking'].pop('budget_tokens', None)
+            data['output_config'] = {**(output_cfg if isinstance(output_cfg, dict) else {}), 'effort': mapped}
+        elif thinking_type == 'adaptive' and not has_output_effort:
+            data['output_config'] = {**(output_cfg if isinstance(output_cfg, dict) else {}), 'effort': 'xhigh'}
 
     return data
 

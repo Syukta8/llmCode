@@ -404,9 +404,9 @@ class TestHarnessIntegration(unittest.TestCase):
         self.assertEqual(oc_med['output_config']['effort'], 'medium')
 
         th_high = normalize_reasoning_effort_payload({'thinking': {'type': 'enabled', 'budget_tokens': 16000}})
-        self.assertEqual(th_high['reasoning_effort'], 'xhigh')
+        self.assertEqual(th_high['output_config']['effort'], 'xhigh')
         th_low = normalize_reasoning_effort_payload({'thinking': {'type': 'enabled', 'budget_tokens': 1024}})
-        self.assertNotIn('reasoning_effort', th_low)
+        self.assertEqual(th_low['output_config']['effort'], 'low')
 
     def test_no_window_kwargs_on_windows(self):
         """Verifies no_window_kwargs returns CREATE_NO_WINDOW on Windows and empty dict on POSIX."""
@@ -419,6 +419,30 @@ class TestHarnessIntegration(unittest.TestCase):
 
         with patch.object(paths_mod.os, 'name', 'posix'):
             self.assertEqual(paths_mod.no_window_kwargs(), {})
+
+    def test_effort_survives_anthropic_adapter(self):
+        """Ensure LiteLLM cannot reintroduce unsupported effort after the hook."""
+        from src.common.litellm_hooks import normalize_reasoning_effort_payload
+        from litellm.llms.anthropic.messages.adapters.transformation import LiteLLMAnthropicMessagesAdapter
+
+        cases = [
+            ({'type': 'enabled', 'budget_tokens': 4096}, None, 'xhigh'),
+            ({'type': 'enabled', 'budget_tokens': 2048}, None, 'medium'),
+            ({'type': 'enabled', 'budget_tokens': 1024}, None, 'low'),
+            ({'type': 'adaptive'}, 'high', 'xhigh'),
+            ({'type': 'adaptive'}, None, 'xhigh'),
+            ({'type': 'adaptive'}, 'medium', 'medium'),
+        ]
+        adapter = LiteLLMAnthropicMessagesAdapter()
+        for thinking, effort, expected in cases:
+            with self.subTest(thinking=thinking, effort=effort):
+                request = {'thinking': thinking}
+                if effort:
+                    request['output_config'] = {'effort': effort}
+                normalize_reasoning_effort_payload(request)
+                translated = {'model': 'openai/llamacpp'}
+                adapter._translate_thinking_to_openai(request, translated, custom_llm_provider='openai')
+                self.assertEqual(translated['reasoning_effort'], expected)
 
 
 if __name__ == '__main__':
