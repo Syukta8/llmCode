@@ -31,6 +31,7 @@ from src.common.paths import (
     get_standard_alias,
     load_config,
     load_hardware,
+    no_window_kwargs,
     save_config,
     sync_config,
     write_secret,
@@ -118,7 +119,7 @@ def get_binary_supported_flags(bin_path: Path) -> Set[str]:
     cmd = [sys.executable, key, '--help'] if bin_path.suffix.lower() == '.py' else [key, '--help']
     flags: Set[str] = set()
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5, cwd=bin_parent, env=env)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5, cwd=bin_parent, env=env, **no_window_kwargs())
         out = (res.stdout or '') + '\n' + (res.stderr or '')
         for token in re.findall(r'(?<!\w)(--[a-zA-Z0-9][a-zA-Z0-9_-]*|-[a-zA-Z0-9]+)', out):
             flags.add(token)
@@ -498,7 +499,7 @@ def system_status():
             if smi_bin:
                 r = subprocess.run(
                     [smi_bin, '--query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu', '--format=csv,noheader,nounits'],
-                    capture_output=True, text=True, timeout=4
+                    capture_output=True, text=True, timeout=4, **no_window_kwargs()
                 )
                 if r.returncode == 0 and r.stdout.strip():
                     v = [x.strip() for x in r.stdout.splitlines()[0].split(',')]
@@ -965,7 +966,7 @@ def launch_backend_process(backend, path, params):
         ollama_model_name = getattr(params, 'alias', 'ollama') or 'ollama'
         try:
             create_cmd = [str(ollama_bin), 'create', ollama_model_name, '-f', str(modelfile_path)]
-            subprocess.run(create_cmd, check=True, capture_output=True, timeout=120)
+            subprocess.run(create_cmd, check=True, capture_output=True, timeout=120, **no_window_kwargs())
         except Exception as e:
             append_log(f"[WARN] Failed to pre-register model in Ollama: {e}")
 
@@ -1055,7 +1056,8 @@ def launch_backend_process(backend, path, params):
     try:
         proc = subprocess.Popen(
             args, stdin=subprocess.DEVNULL, stdout=log_handle,
-            stderr=subprocess.STDOUT, start_new_session=True, cwd=bin_parent, env=env
+            stderr=subprocess.STDOUT, start_new_session=True, cwd=bin_parent, env=env,
+            **no_window_kwargs(),
         )
     except Exception as e:
         append_log(f"[ERROR] Failed to spawn {backend}: {e}")

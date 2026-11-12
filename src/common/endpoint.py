@@ -16,7 +16,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from src.common.paths import CONFIG_DIR, LOG_DIR, REPO_ROOT
+from src.common.paths import CONFIG_DIR, LOG_DIR, REPO_ROOT, no_window_kwargs
 
 PROXY_PORT_OFFSET = 100
 PROXY_CONFIG_FILE = CONFIG_DIR / 'litellm_proxy.yaml'
@@ -119,6 +119,7 @@ def ensure_litellm_proxy(engine_url: str, engine_port: int, alias: str, api_key:
             _proxy['proc'] = subprocess.Popen(
                 [str(exe), '--config', str(PROXY_CONFIG_FILE), '--host', '127.0.0.1', '--port', str(port)],
                 stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=(sys.platform != 'win32'),
+                **no_window_kwargs(),
             )
         _proxy['signature'] = signature
         _proxy['port'] = port

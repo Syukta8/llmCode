@@ -482,20 +482,19 @@ def cmd_dash(args):
 
     if args.daemon:
         DAEMON_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        log_f = open(DAEMON_LOG_FILE, 'a', encoding='utf-8')
         popen_kwargs = {
             'stdin': subprocess.DEVNULL,
-            'stdout': log_f,
             'stderr': subprocess.STDOUT,
             'cwd': str(REPO_ROOT),
         }
         if os.name == 'nt':
-            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP on Windows
-            popen_kwargs['creationflags'] = 0x00000008 | 0x00000200
+            # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP prevents daemon and child console popups on Windows
+            popen_kwargs['creationflags'] = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000) | 0x00000200
         else:
             popen_kwargs['start_new_session'] = True
 
-        proc = subprocess.Popen(cmd, **popen_kwargs)
+        with open(DAEMON_LOG_FILE, 'a', encoding='utf-8') as log_f:
+            proc = subprocess.Popen(cmd, stdout=log_f, **popen_kwargs)
         PID_FILE.parent.mkdir(parents=True, exist_ok=True)
         PID_FILE.write_text(f"{proc.pid}\n", encoding='utf-8')
         print(f"Started llm-dash daemon (PID {proc.pid}) on {url}")

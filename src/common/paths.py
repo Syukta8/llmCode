@@ -54,6 +54,13 @@ STANDARD_ALIASES = {
 _config_lock = threading.RLock()
 
 
+def no_window_kwargs() -> Dict[str, Any]:
+    """Returns Windows CREATE_NO_WINDOW creationflags for silent background subprocesses."""
+    if os.name == 'nt':
+        return {'creationflags': getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)}
+    return {}
+
+
 def write_secret(path: Path, content: str) -> None:
     """Writes sensitive credentials atomically with restricted user-only permissions (0o600 or Windows ACL)."""
     path = Path(path)
@@ -75,6 +82,7 @@ def write_secret(path: Path, content: str) -> None:
                         ['icacls', str(tmp_path), '/inheritance:r', '/grant:r', f'{username}:F'],
                         capture_output=True,
                         check=False,
+                        **no_window_kwargs(),
                     )
             except Exception:
                 pass
@@ -291,9 +299,9 @@ def _discover_opencode() -> Optional[str]:
             try:
                 cmd_target = str(c.resolve())
                 if os.name == 'nt' and cmd_target.lower().endswith(('.cmd', '.bat')):
-                    res = subprocess.run(['cmd.exe', '/c', cmd_target, '--version'], capture_output=True, text=True, timeout=3)
+                    res = subprocess.run(['cmd.exe', '/c', cmd_target, '--version'], capture_output=True, text=True, timeout=3, **no_window_kwargs())
                 else:
-                    res = subprocess.run([cmd_target, '--version'], capture_output=True, text=True, timeout=3)
+                    res = subprocess.run([cmd_target, '--version'], capture_output=True, text=True, timeout=3, **no_window_kwargs())
                 if res.returncode == 0:
                     ver_out = (res.stdout or '') + (res.stderr or '')
                     ver = parse_version_tuple(ver_out)
@@ -343,7 +351,7 @@ def _discover_npm_harness(name: str) -> Optional[str]:
         try:
             target = str(c.resolve()) if c.suffix.lower() not in ('.cmd', '.bat') else str(c)
             argv = ['cmd.exe', '/c', target, '--version'] if os.name == 'nt' and target.lower().endswith(('.cmd', '.bat')) else [target, '--version']
-            res = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+            res = subprocess.run(argv, capture_output=True, text=True, timeout=10, **no_window_kwargs())
             if res.returncode == 0 and parse_version_tuple((res.stdout or '') + (res.stderr or '')) >= floor:
                 return str(c)
         except Exception:

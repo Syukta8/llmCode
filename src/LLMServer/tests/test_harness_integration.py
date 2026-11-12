@@ -408,6 +408,18 @@ class TestHarnessIntegration(unittest.TestCase):
         th_low = normalize_reasoning_effort_payload({'thinking': {'type': 'enabled', 'budget_tokens': 1024}})
         self.assertNotIn('reasoning_effort', th_low)
 
+    def test_no_window_kwargs_on_windows(self):
+        """Verifies no_window_kwargs returns CREATE_NO_WINDOW on Windows and empty dict on POSIX."""
+        import src.common.paths as paths_mod
+
+        with patch.object(paths_mod.os, 'name', 'nt'):
+            kw = paths_mod.no_window_kwargs()
+            self.assertIn('creationflags', kw)
+            self.assertTrue(kw['creationflags'] & 0x08000000)
+
+        with patch.object(paths_mod.os, 'name', 'posix'):
+            self.assertEqual(paths_mod.no_window_kwargs(), {})
+
 
 if __name__ == '__main__':
     unittest.main()
