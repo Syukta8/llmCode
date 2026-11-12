@@ -155,8 +155,9 @@ def _reinstall_module_engines(non_interactive: bool) -> bool:
 def _reinstall_module_agents(py_exe: str, non_interactive: bool):
     from src.build.setup_binaries import install_cli_agents, setup_opencode_orchestrator
     print("\n[Module: agents] Installing CLI coding agents in .venv...")
-    install_cli_agents(py_exe, non_interactive=non_interactive)
-    setup_opencode_orchestrator()
+    selected = install_cli_agents(py_exe, non_interactive=non_interactive)
+    if 'opencode' in selected:
+        setup_opencode_orchestrator()
 
 
 def _reinstall_module_configs(non_interactive: bool):
@@ -181,16 +182,18 @@ def cmd_check_update(args):
     steps = res['steps']
     changed = res['changed_files']
 
-    # Always verify that coding agent harnesses are present in .venv even on incremental runs
+    # Verify only selected coding agent harnesses are present in .venv on incremental runs
+    from src.common.paths import get_selected_agents
     venv_dir = REPO_ROOT / 'src' / 'LLMServer' / '.venv'
     agents = discover_agents()
-    if not agents.get('opencode_installed'):
+    selected = get_selected_agents()
+    if 'opencode' in selected and not agents.get('opencode_installed'):
         from src.build.setup_binaries import _install_opencode_into_venv, setup_opencode_orchestrator
         print("OpenCode v2 (>= 2.0.0) not detected or legacy v1 present; upgrading to OpenCode v2 in .venv...")
         _install_opencode_into_venv(venv_dir)
         setup_opencode_orchestrator()
     for h_name in ('claude', 'codex'):
-        if not agents.get(f'{h_name}_installed'):
+        if h_name in selected and not agents.get(f'{h_name}_installed'):
             from src.build.setup_binaries import _install_npm_harness
             _install_npm_harness(venv_dir, h_name)
     sync_config(apply_hardware_defaults=False)
@@ -556,6 +559,7 @@ def cmd_harness(args):
         write_claude_mcp_config,
         write_codex_default_config,
         write_codex_profile,
+        write_codex_shim,
     )
     from src.common.endpoint import resolve_base_url
     from src.LLMServer.app import write_opencode_config
@@ -595,6 +599,7 @@ def cmd_harness(args):
             print(f"Warning: {warn}")
         write_codex_profile(Path.home(), base_url, alias, context=context)
         write_codex_default_config(Path.home(), base_url, alias, context=context)
+        write_codex_shim(Path.home(), agent_bin, venv_dir=REPO_ROOT / 'src' / 'LLMServer' / '.venv')
         cmd = build_launch_command('codex', agent_bin, alias, base_url, restore=restore, session_id=session_id)
 
     label = HARNESSES.get(harness_id, None)

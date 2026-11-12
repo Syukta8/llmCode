@@ -14,7 +14,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Repository root directory
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -351,6 +351,9 @@ def _discover_npm_harness(name: str) -> Optional[str]:
     return None
 
 
+VALID_HARNESSES: Tuple[str, ...] = ('opencode', 'claude', 'codex')
+
+
 def discover_agents() -> Dict[str, Any]:
     """Builds the `agents` config section for every supported harness (opencode, claude, codex)."""
     out: Dict[str, Any] = {}
@@ -391,6 +394,7 @@ def _default_config() -> Dict[str, Any]:
             'ollama_exists': ollama_bin.is_file(),
         },
         'agents': discover_agents(),
+        'selected_agents': None,
         'settings': {
             'dash_port': int(os.environ.get('LLAMA_PORT_DASH', '7860')),
             'server_port': int(os.environ.get('LLAMA_PORT', '8080')),
@@ -546,6 +550,24 @@ def sync_config(apply_hardware_defaults: bool = False) -> Dict[str, Any]:
             cfg['settings']['last_project_dir'] = str(REPO_ROOT)
 
         return save_config(cfg)
+
+
+def get_selected_agents(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Returns explicitly selected harnesses from config, or infers from installed agents for legacy configs."""
+    data = cfg if cfg is not None else load_config()
+    raw = data.get('selected_agents')
+    if isinstance(raw, list):
+        return [h for h in VALID_HARNESSES if h in raw]
+    agents = data.get('agents', {})
+    installed = [h for h in VALID_HARNESSES if agents.get(f'{h}_installed')]
+    return installed or list(VALID_HARNESSES)
+
+
+def save_selected_agents(selected: List[str]) -> Dict[str, Any]:
+    """Persists the user's chosen CLI harness subset into config/config.json."""
+    cfg = load_config()
+    cfg['selected_agents'] = [h for h in VALID_HARNESSES if h in selected]
+    return save_config(cfg)
 
 
 def get_llama_server_binary() -> Path:

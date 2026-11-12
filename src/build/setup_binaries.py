@@ -1916,41 +1916,100 @@ def setup_mcp_servers(non_interactive: bool = False) -> Dict[str, Any]:
     user_home = Path.home()
     base_url = f'http://127.0.0.1:{port}'
 
-    write_opencode_config(REPO_ROOT, alias, port, context_limit=context, mcp_servers=selected_servers)
-    write_codex_profile(user_home, base_url, alias, context=context, mcp_servers=selected_servers)
-    write_claude_mcp_config(user_home, mcp_servers=selected_servers)
+    from src.common.paths import get_selected_agents
+    selected = get_selected_agents()
+    if 'opencode' in selected:
+        write_opencode_config(REPO_ROOT, alias, port, context_limit=context, mcp_servers=selected_servers)
+    if 'codex' in selected:
+        write_codex_profile(user_home, base_url, alias, context=context, mcp_servers=selected_servers)
+    if 'claude' in selected:
+        write_claude_mcp_config(user_home, mcp_servers=selected_servers)
 
     enabled_list = list(selected_servers.keys())
-    if enabled_list:
-        print(f"Configured and enabled {len(enabled_list)} MCP servers across OpenCode, Claude Code, and Codex: {', '.join(enabled_list)}")
+    target_names = [h for h in selected if h in ('opencode', 'claude', 'codex')]
+    if enabled_list and target_names:
+        print(f"Configured and enabled {len(enabled_list)} MCP servers across {', '.join(target_names)}: {', '.join(enabled_list)}")
+    elif not target_names:
+        print("MCP servers: skipped harness sync (no harnesses selected).")
     else:
         print("MCP servers: strict opt-in retained (0 servers enabled across harnesses).")
 
     return selected_servers
 
 
-def install_cli_agents(venv_python: str, non_interactive: bool = False):
-    """Prompts user to install OpenCode, Claude Code and/or Codex CLI coding agents inside the llm-dash .venv."""
+_HARNESS_TOKEN_MAP = {
+    '1': 'opencode',
+    'opencode': 'opencode',
+    '2': 'claude',
+    'claude': 'claude',
+    '3': 'codex',
+    'codex': 'codex',
+}
+
+
+def parse_harness_selection(raw: str) -> Optional[List[str]]:
+    """Parses harness setup input (`all`, `skip`, or comma/space-separated `1`/`2`/`3`/`opencode`/`claude`/`codex`)."""
+    cleaned = raw.strip().lower()
+    if not cleaned or cleaned in ('a', 'all'):
+        return ['opencode', 'claude', 'codex']
+    if cleaned in ('s', 'skip', 'skip all', 'none'):
+        return []
+    tokens = [t for t in re.split(r'[\s,]+', cleaned) if t]
+    chosen: List[str] = []
+    for tok in tokens:
+        mapped = _HARNESS_TOKEN_MAP.get(tok)
+        if not mapped:
+            return None
+        if mapped not in chosen:
+            chosen.append(mapped)
+    return [h for h in ('opencode', 'claude', 'codex') if h in chosen]
+
+
+def install_cli_agents(venv_python: str, non_interactive: bool = False) -> List[str]:
+    """Prompts user to install OpenCode, Claude Code, and/or Codex individually or together inside llm-dash .venv."""
+    from src.common.paths import save_selected_agents
+
     venv_dir = REPO_ROOT / 'src' / 'LLMServer' / '.venv'
     _purge_aider(venv_python, venv_dir)
     print("\n=== CLI Coding Agents Setup (Installed in llm-dash .venv) ===")
-    print("  [1] Install ALL: OpenCode, Claude Code & Codex in .venv (Recommended)")
-    print("  [2] Install OpenCode only in .venv")
-    print("  [3] Install Claude Code + Codex only in .venv")
-    print("  [4] Skip CLI agent installation")
+    print("  [1] opencode  - OpenCode v2 CLI")
+    print("  [2] claude    - Claude Code CLI")
+    print("  [3] codex     - OpenAI Codex CLI")
+    print("  [A] All (opencode, claude, codex) (Recommended)")
+    print("  [S] Skip all")
 
-    choice = _prompt_choice("Select CLI agent option (1/2/3/4)", ['1', '2', '3', '4'], default='1', non_interactive=non_interactive)
+    selected: List[str] = ['opencode', 'claude', 'codex']
+    if not non_interactive and sys.stdin.isatty():
+        while True:
+            try:
+                raw = input("Select harness(es) (e.g. a, s, 1, 2, 3, or 1,2) [a]: ")
+            except EOFError:
+                raw = 'a'
+            parsed = parse_harness_selection(raw)
+            if parsed is not None:
+                selected = parsed
+                break
+            print("Invalid choice. Enter 'a' (all), 's' (skip all), or comma-separated 1/2/3/opencode/claude/codex.")
 
-    if choice in ('1', '2'):
+    save_selected_agents(selected)
+
+    if not selected:
+        print("Skipping CLI coding agent installation.")
+        return selected
+
+    if 'opencode' in selected:
         print("\nInstalling OpenCode CLI into llm-dash .venv...")
         _install_opencode_into_venv(venv_dir, non_interactive=non_interactive)
         setup_opencode_orchestrator()
 
-    if choice in ('1', '3'):
+    if 'claude' in selected or 'codex' in selected:
         _ensure_npm_available(non_interactive)
         _ensure_litellm_proxy(venv_python)
-        for name in NPM_HARNESS_PACKAGES:
-            _install_npm_harness(venv_dir, name, non_interactive=non_interactive)
+        for name in ('claude', 'codex'):
+            if name in selected:
+                _install_npm_harness(venv_dir, name, non_interactive=non_interactive)
+
+    return selected
 
 
 def setup_opencode_orchestrator():
@@ -1972,16 +2031,26 @@ def setup_opencode_orchestrator():
 
 def setup_agent_configs(home: Optional[Path] = None, port: int = 8080, non_interactive: bool = False) -> Dict[str, Path]:
     """
-    Configures Claude Code (~/.claude/settings.json) and Codex (~/.codex/config.toml & llmcode.config.toml)
-    with model=llamacpp, bypassPermissions, and llmdash context size.
+    Configures selected harnesses (Claude Code `~/.claude/settings.json` and Codex `~/.codex/config.toml` & `llmcode.config.toml`)
+    with model=llamacpp, bypassPermissions, apiKeyHelper / shim, and llmdash context size.
     """
     from src.common.harness_config import setup_all_agent_configs
+    from src.common.paths import get_selected_agents
+    selected = get_selected_agents()
     print("\n=== Coding Agent Configurations (Claude Code & Codex) ===")
+    if not any(h in selected for h in ('claude', 'codex')):
+        print("  Skipped (neither Claude Code nor Codex selected).")
+        return {}
     try:
-        written = setup_all_agent_configs(home=home, port=port, non_interactive=non_interactive)
-        print(f"  ✓ Claude Code settings : {written.get('claude')} (model=llamacpp, permissions=bypassPermissions)")
-        print(f"  ✓ Codex profile        : {written.get('codex_profile')} (model=llamacpp, approval_policy=never)")
-        print(f"  ✓ Codex default config : {written.get('codex_config')}")
+        written = setup_all_agent_configs(home=home, port=port, non_interactive=non_interactive, selected_agents=selected)
+        if 'claude' in written:
+            print(f"  ✓ Claude Code settings : {written.get('claude')} (model=llamacpp, apiKeyHelper, bypassPermissions)")
+        if 'codex_profile' in written:
+            print(f"  ✓ Codex profile        : {written.get('codex_profile')} (model=llamacpp, approval_policy=never)")
+        if 'codex_config' in written:
+            print(f"  ✓ Codex default config : {written.get('codex_config')}")
+        if 'codex_shim' in written:
+            print(f"  ✓ Codex wrapper shim   : {written.get('codex_shim')} (external terminal key injection)")
         return written
     except Exception as e:
         print(f"  Warning: failed to configure agent profiles: {e}")
@@ -2169,15 +2238,16 @@ def main(non_interactive: bool = False, uninstall: bool = False):
     # 5. Install CLI coding agents (OpenCode, Claude Code & Codex) inside llm-dash .venv
     venv_py = REPO_ROOT / 'src' / 'LLMServer' / '.venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python3')
     py_exe = str(venv_py) if venv_py.is_file() else sys.executable
-    install_cli_agents(py_exe, non_interactive=non_interactive)
+    selected_agents = install_cli_agents(py_exe, non_interactive=non_interactive)
 
-    # 5.5. Configure Model Context Protocol (MCP) servers across OpenCode, Claude Code, and Codex
+    # 5.5. Configure Model Context Protocol (MCP) servers across selected harnesses
     setup_mcp_servers(non_interactive=non_interactive)
 
-    # 6.5. Deploy OpenCode orchestrator skill
-    setup_opencode_orchestrator()
+    # 6.5. Deploy OpenCode orchestrator skill when selected
+    if 'opencode' in selected_agents:
+        setup_opencode_orchestrator()
 
-    # 6.6. Configure Claude Code and Codex profiles with llamacpp model, bypassPermissions, and llmdash context
+    # 6.6. Configure selected Claude Code and Codex profiles
     setup_agent_configs(non_interactive=non_interactive)
 
     # 7. Render desktop entry template with absolute paths

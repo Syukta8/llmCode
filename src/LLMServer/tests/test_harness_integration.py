@@ -286,6 +286,81 @@ class TestHarnessIntegration(unittest.TestCase):
             self.assertNotIn('enabled', srv)
             self.assertTrue(srv['disabled'])
 
+    def test_parse_harness_selection_and_selected_agents(self):
+        """Verifies individual, multi-select, all, and skip-all harness selection parsing."""
+        from src.build.setup_binaries import parse_harness_selection
+        from src.common.paths import get_selected_agents
+
+        self.assertEqual(parse_harness_selection('a'), ['opencode', 'claude', 'codex'])
+        self.assertEqual(parse_harness_selection('ALL'), ['opencode', 'claude', 'codex'])
+        self.assertEqual(parse_harness_selection('s'), [])
+        self.assertEqual(parse_harness_selection('skip all'), [])
+        self.assertEqual(parse_harness_selection('1'), ['opencode'])
+        self.assertEqual(parse_harness_selection('2'), ['claude'])
+        self.assertEqual(parse_harness_selection('3'), ['codex'])
+        self.assertEqual(parse_harness_selection('codex, opencode'), ['opencode', 'codex'])
+        self.assertEqual(parse_harness_selection('2 3'), ['claude', 'codex'])
+        self.assertIsNone(parse_harness_selection('invalid'))
+
+        self.assertEqual(get_selected_agents({'selected_agents': []}), [])
+        self.assertEqual(get_selected_agents({'selected_agents': ['claude']}), ['claude'])
+        self.assertEqual(
+            get_selected_agents({'agents': {'opencode_installed': True, 'claude_installed': False, 'codex_installed': False}}),
+            ['opencode'],
+        )
+
+    def test_claude_apikey_helper_and_codex_shim(self):
+        """Verifies Claude apiKeyHelper cleanup/generation, Codex shim, and scoped setup_all_agent_configs."""
+        from src.common.harness_config import write_codex_shim, setup_all_agent_configs
+
+        key_file = self.tmp_dir / 'api_key'
+        key_file.write_text('sk-local-test', encoding='utf-8')
+
+        claude_dir = self.home_dir / '.claude'
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        (claude_dir / 'settings.json').write_text(
+            json.dumps({'env': {'ANTHROPIC_API_KEY': '{file:D:/llmCode/config/api_key}'}}),
+            encoding='utf-8',
+        )
+        settings_path = write_claude_settings(self.home_dir, 'http://127.0.0.1:8180', 'llamacpp', context=65536, key_file=key_file)
+        parsed = json.loads(settings_path.read_text(encoding='utf-8'))
+        self.assertIn('apiKeyHelper', parsed)
+        self.assertIn(str(key_file.resolve()), parsed['apiKeyHelper'])
+        self.assertNotIn('ANTHROPIC_API_KEY', parsed['env'])
+        self.assertEqual(parsed['env']['ANTHROPIC_BASE_URL'], 'http://127.0.0.1:8180')
+
+        shims = write_codex_shim(self.home_dir, '/path/to/codex', key_file=key_file)
+        self.assertEqual(len(shims), 1)
+        self.assertTrue(shims[0].is_file())
+        shim_text = shims[0].read_text(encoding='utf-8')
+        self.assertIn(CODEX_KEY_ENV, shim_text)
+        self.assertIn(f'--profile {CODEX_PROFILE}', shim_text)
+
+        isolated_home = self.tmp_dir / 'opencode_only_home'
+        isolated_home.mkdir(parents=True, exist_ok=True)
+        res = setup_all_agent_configs(home=isolated_home, selected_agents=['opencode'])
+        self.assertEqual(res, {})
+        self.assertFalse((isolated_home / '.claude').exists())
+        self.assertFalse((isolated_home / '.codex').exists())
+
+    def test_sync_external_harnesses_updates_proxy_base_url(self):
+        """Verifies _sync_external_harnesses probes endpoints and syncs proxy base_url into Claude settings."""
+        import src.LLMServer.app as app_mod
+
+        fake_cfg = {
+            'selected_agents': ['claude'],
+            'agents': {'claude_installed': True, 'codex_installed': False},
+        }
+        with patch.object(app_mod, 'HOME', self.home_dir), \
+             patch.object(app_mod, 'load_config', return_value=fake_cfg), \
+             patch.object(app_mod, 'resolve_base_url', return_value=('http://127.0.0.1:8180', 'proxy')) as mock_res:
+            app_mod._sync_external_harnesses('llamacpp', 65536, 'sk-test')
+
+        mock_res.assert_called_once_with('anthropic', app_mod.PORT, 'llamacpp', 'sk-test')
+        parsed = json.loads((self.home_dir / '.claude' / 'settings.json').read_text(encoding='utf-8'))
+        self.assertEqual(parsed['env']['ANTHROPIC_BASE_URL'], 'http://127.0.0.1:8180')
+        self.assertIn('apiKeyHelper', parsed)
+
 
 if __name__ == '__main__':
     unittest.main()

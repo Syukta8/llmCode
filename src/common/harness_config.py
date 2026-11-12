@@ -7,7 +7,9 @@ embedding `[profiles.<name>]` in the base `config.toml`. llmCode writes `~/.code
 and configures `~/.codex/config.toml` and Claude Code's `~/.claude/settings.json` with timestamped backups.
 """
 import json
+import os
 import re
+import shlex
 import shutil
 import tomllib
 from datetime import datetime
@@ -15,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.common.harness import CODEX_KEY_ENV, CODEX_PROFILE, claude_env
+from src.common.paths import API_KEY_FILE, get_selected_agents
 
 BLOCK_BEGIN = '# >>> llmcode managed block (do not edit; rewritten on every launch) >>>'
 BLOCK_END = '# <<< llmcode managed block <<<'
@@ -198,13 +201,29 @@ def cleanup_legacy_codex_config(home: Path) -> Optional[Path]:
     return None
 
 
-def write_claude_settings(home: Path, base_url: str, alias: str, context: int = 0) -> Path:
+def claude_api_key_helper(key_file: Path = API_KEY_FILE) -> str:
+    """Returns a shell command that reads the rotating local API key file on demand for Claude Code."""
+    resolved = str(key_file.resolve())
+    if os.name == 'nt':
+        escaped = resolved.replace("'", "''")
+        return f"powershell -NoProfile -Command Get-Content '{escaped}' -Raw"
+    return f"cat {shlex.quote(resolved)}"
+
+
+def write_claude_settings(
+    home: Path,
+    base_url: str,
+    alias: str,
+    context: int = 0,
+    key_file: Optional[Path] = None,
+) -> Path:
     """
     Writes or merges global Claude Code settings at `<home>/.claude/settings.json`.
     Sets permissions to bypassPermissions per official docs:
       - defaultMode: "bypassPermissions"
       - permissions: {"defaultMode": "bypassPermissions"}
-    Sets model to alias (e.g. llamacpp) and configures env (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, etc.).
+    Sets model to alias (e.g. llamacpp), configures env (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, etc.),
+    and attaches `apiKeyHelper` reading config/api_key so standalone `claude` matches OpenCode.
     Preserves other user-defined settings, creates timestamped backup, and writes
     dedicated `<home>/.claude/llmcode.settings.json` for `--settings` local launches.
     """
@@ -224,15 +243,21 @@ def write_claude_settings(home: Path, base_url: str, alias: str, context: int = 
         except Exception:
             pass
 
+    helper_cmd = claude_api_key_helper(key_file or API_KEY_FILE)
+
     data['defaultMode'] = 'bypassPermissions'
     if not isinstance(data.get('permissions'), dict):
         data['permissions'] = {}
     data['permissions']['defaultMode'] = 'bypassPermissions'
     data['model'] = alias
+    data['apiKeyHelper'] = helper_cmd
 
     env = data.get('env')
     if not isinstance(env, dict):
         env = {}
+    # Remove broken literal file-interpolation placeholders if a user tried OpenCode syntax in Claude env
+    if isinstance(env.get('ANTHROPIC_API_KEY'), str) and ('{file:' in env['ANTHROPIC_API_KEY']):
+        env.pop('ANTHROPIC_API_KEY', None)
     claude_defaults = claude_env(base_url, alias)
     env.update(claude_defaults)
     data['env'] = env
@@ -248,6 +273,7 @@ def write_claude_settings(home: Path, base_url: str, alias: str, context: int = 
         'defaultMode': 'bypassPermissions',
         'permissions': {'defaultMode': 'bypassPermissions'},
         'model': alias,
+        'apiKeyHelper': helper_cmd,
         'env': dict(claude_defaults),
     }
     llmcode_settings_file.write_text(json.dumps(local_payload, indent=2) + '\n', encoding='utf-8')
@@ -429,22 +455,77 @@ def write_codex_default_config(
     return cfg
 
 
-def setup_all_agent_configs(home: Optional[Path] = None, port: int = 8080, non_interactive: bool = False) -> Dict[str, Path]:
+def write_codex_shim(
+    home: Path,
+    codex_bin: str,
+    key_file: Path = API_KEY_FILE,
+    venv_dir: Optional[Path] = None,
+) -> List[Path]:
     """
-    Configures Claude Code (~/.claude/settings.json) and Codex (~/.codex/config.toml & llmcode.config.toml)
-    with model, context size, and bypassPermissions based on config/config.json.
+    Writes a lightweight `llmcode-codex` wrapper script so external terminals can launch Codex
+    against the rotating local API key without storing plaintext secrets in TOML.
     """
-    from src.common.paths import load_config
+    targets: List[Path] = [home / '.local' / 'bin']
+    if venv_dir is not None and venv_dir.is_dir():
+        targets.append(venv_dir / ('Scripts' if os.name == 'nt' else 'bin'))
+
+    resolved_key = str(key_file.resolve())
+    written: List[Path] = []
+    for bin_dir in targets:
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        if os.name == 'nt':
+            shim = bin_dir / 'llmcode-codex.cmd'
+            content = (
+                '@echo off\r\n'
+                'setlocal\r\n'
+                f'if exist "{resolved_key}" set /p {CODEX_KEY_ENV}=<"{resolved_key}"\r\n'
+                f'call "{codex_bin}" --profile {CODEX_PROFILE} %*\r\n'
+            )
+            shim.write_text(content, encoding='utf-8')
+        else:
+            shim = bin_dir / 'llmcode-codex'
+            content = (
+                '#!/usr/bin/env sh\n'
+                f'if [ -f {shlex.quote(resolved_key)} ]; then\n'
+                f'  export {CODEX_KEY_ENV}="$(cat {shlex.quote(resolved_key)})"\n'
+                'fi\n'
+                f'exec {shlex.quote(codex_bin)} --profile {CODEX_PROFILE} "$@"\n'
+            )
+            shim.write_text(content, encoding='utf-8')
+            shim.chmod(0o755)
+        written.append(shim)
+    return written
+
+
+def setup_all_agent_configs(
+    home: Optional[Path] = None,
+    port: int = 8080,
+    non_interactive: bool = False,
+    selected_agents: Optional[List[str]] = None,
+) -> Dict[str, Path]:
+    """
+    Configures selected/installed harnesses (Claude Code `~/.claude/settings.json` and
+    Codex `~/.codex/config.toml` & `llmcode.config.toml`) with model, context size, and permissions.
+    """
+    from src.common.paths import SRC_DIR, load_config
     user_home = home or Path.home()
     cfg = load_config()
+    selected = selected_agents if selected_agents is not None else get_selected_agents(cfg)
     alias = cfg.get('settings', {}).get('last_alias') or 'llamacpp'
     context = int(cfg.get('settings', {}).get('last_context') or 8192)
     server_port = int(cfg.get('settings', {}).get('server_port') or port)
     base_url = f'http://127.0.0.1:{server_port}'
 
     results: Dict[str, Path] = {}
-    results['claude'] = write_claude_settings(user_home, base_url, alias, context=context)
-    results['claude_mcp'] = write_claude_mcp_config(user_home)
-    results['codex_profile'] = write_codex_profile(user_home, base_url, alias, context=context)
-    results['codex_config'] = write_codex_default_config(user_home, base_url, alias, context=context)
+    if 'claude' in selected:
+        results['claude'] = write_claude_settings(user_home, base_url, alias, context=context)
+        results['claude_mcp'] = write_claude_mcp_config(user_home)
+    if 'codex' in selected:
+        results['codex_profile'] = write_codex_profile(user_home, base_url, alias, context=context)
+        results['codex_config'] = write_codex_default_config(user_home, base_url, alias, context=context)
+        codex_bin = cfg.get('agents', {}).get('codex')
+        if codex_bin:
+            shims = write_codex_shim(user_home, codex_bin, venv_dir=SRC_DIR / 'LLMServer' / '.venv')
+            if shims:
+                results['codex_shim'] = shims[0]
     return results

@@ -27,6 +27,7 @@ from src.common.paths import (
     get_llama_server_binary,
     get_koboldcpp_binary,
     get_ollama_binary,
+    get_selected_agents,
     get_standard_alias,
     load_config,
     load_hardware,
@@ -51,6 +52,8 @@ from src.common.harness import (
 )
 from src.common.harness_config import (
     write_codex_profile,
+    write_codex_default_config,
+    write_codex_shim,
     write_claude_settings,
     write_claude_mcp_config,
     get_configured_mcp_servers,
@@ -1104,6 +1107,46 @@ def launch_backend_process(backend, path, params):
     return args
 
 
+def _sync_external_harnesses(alias: str, context: int, expected_key: Optional[str]) -> None:
+    """Probes native endpoints and syncs external Claude/Codex configs + LiteLLM proxy once the engine is healthy."""
+    cfg = load_config()
+    selected = set(get_selected_agents(cfg))
+    agents = cfg.get('agents', {})
+    want_claude = 'claude' in selected or bool(agents.get('claude_installed'))
+    want_codex = 'codex' in selected or bool(agents.get('codex_installed'))
+    if not (want_claude or want_codex):
+        return
+
+    key = expected_key or ''
+    if want_claude:
+        try:
+            base_url, _ = resolve_base_url('anthropic', PORT, alias, key)
+            write_claude_settings(HOME, base_url, alias, context=context)
+        except Exception:
+            pass
+    if want_codex:
+        try:
+            base_url, _ = resolve_base_url('responses', PORT, alias, key)
+            write_codex_profile(HOME, base_url, alias, context=context)
+            write_codex_default_config(HOME, base_url, alias, context=context)
+            if agents.get('codex'):
+                write_codex_shim(HOME, agents['codex'], key_file=API_KEY_FILE, venv_dir=ROOT / '.venv')
+        except Exception:
+            pass
+
+
+def _wait_and_sync_external_harnesses(alias: str, context: int, expected_key: Optional[str], timeout_s: float = 180.0) -> None:
+    """Waits for deployed engine health, then prepares proxy + external terminal configs."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if not alive() or get_current_api_key() != expected_key:
+            return
+        if server_health():
+            _sync_external_harnesses(alias, context, expected_key)
+            return
+        time.sleep(2.0)
+
+
 @app.post('/api/start')
 def start(params: Deploy):
     path = safe_model_path(params.path)
@@ -1141,7 +1184,15 @@ def start(params: Deploy):
             'last_mmproj_mode': params.mmproj_mode,
             'last_custom_flags': ' '.join(sanitize_managed_custom_flags(params.custom_flags.split())),
         })
-        write_opencode_config(None, params.alias, PORT, context_limit=params.context)
+        cfg_now = load_config()
+        if 'opencode' in get_selected_agents(cfg_now) or cfg_now.get('agents', {}).get('opencode_installed'):
+            write_opencode_config(None, params.alias, PORT, context_limit=params.context)
+        threading.Thread(
+            target=_wait_and_sync_external_harnesses,
+            args=(params.alias, params.context, get_current_api_key()),
+            daemon=True,
+            name='harness-sync',
+        ).start()
         return {'ok': True, 'pid': proc.pid, 'command': args, 'message': f'[{params.backend}] launching; health may take time to become ready.'}
 
 
@@ -1663,6 +1714,8 @@ def launch_harness_by_id(harness_id: str, params: HarnessLaunch) -> Dict[str, An
         base_url, ep_mode = resolve_base_url('responses', PORT, params.alias, curr_api_key)
         warning_msg = context_warning('codex', params.context)
         write_codex_profile(HOME, base_url, params.alias, context=params.context)
+        write_codex_default_config(HOME, base_url, params.alias, context=params.context)
+        write_codex_shim(HOME, codex_bin, key_file=API_KEY_FILE, venv_dir=ROOT / '.venv')
         cmd = build_launch_command(
             'codex',
             codex_bin,
